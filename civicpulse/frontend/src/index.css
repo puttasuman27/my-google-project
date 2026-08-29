@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+@theme {
+  --color-civic-deep: #0B4D3C;
+  --color-civic-primary: #047857;
+  --color-civic-mint: #10B981;
+  --color-civic-orange: #F97316;
+  --color-civic-canvas: #F4F8F6;
+  --radius-card: 28px;
+}
+
+body {
+  background-color: #F4F8F6;
+  color: #1E293B;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  margin: 0;
+  padding: 0;
+}
+
+/* Custom Range Input Styling for Before/After Slider */
+input[type="range"]::-webkit-slider-thumb {
+  pointer-events: all;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  opacity: 0;
+  cursor: ew-resize;
+}
