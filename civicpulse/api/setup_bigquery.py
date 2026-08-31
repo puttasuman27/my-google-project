@@ -18,7 +18,7 @@ def init_bigquery():
     print(f"[OK] Dataset {dataset_ref} verified/created.")
 
     # 2. Canonical Incidents Table
-    incidents_table_id = f"{dataset_ref}.canonical_incidents"
+    incidents_table_id = f"{dataset_ref}.incidents"
     incidents_schema = [
         bigquery.SchemaField("incident_id", "STRING", mode="REQUIRED"),
         bigquery.SchemaField("category", "STRING", mode="REQUIRED"),

@@ -1,12 +1,12 @@
 import os
 import uuid
+import base64
 from typing import Optional
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from google.cloud import bigquery
 
-# Import Agent Pipeline
 from agents.vision_agent import VisionAgent
 from agents.incident_agent import IncidentAgent
 from agents.operations_agent import OperationsAgent
@@ -14,11 +14,7 @@ from agents.resolution_agent import ResolutionAgent
 
 load_dotenv()
 
-app = FastAPI(
-    title="CivicPulse AI Resolution Intelligence API",
-    description="Agentic Municipal Infrastructure Management Platform powered by Google Cloud & Gemini",
-    version="2.0.0"
-)
+app = FastAPI(title="CivicPulse Core API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,197 +24,145 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Agents
 vision_agent = VisionAgent()
 incident_agent = IncidentAgent()
 operations_agent = OperationsAgent()
 resolution_agent = ResolutionAgent()
 
+GCP_PROJECT = os.getenv("GCP_PROJECT_ID", "civicpulse-app-505811")
+BQ_DATASET = os.getenv("BIGQUERY_DATASET", "civicpulse_analytics")
+
+
 @app.get("/health")
 def health_check():
-    return {
-        "status": "healthy",
-        "service": "civicpulse-agentic-core",
-        "version": "2.0.0"
-    }
+    return {"status": "healthy", "service": "civicpulse-agentic-core"}
 
-# -------------------------------------------------------------
-# 1. CITIZEN INTAKE & MULTI-AGENT INGESTION PIPELINE
-# -------------------------------------------------------------
-@app.post("/api/v1/citizen/report")
-async def report_issue(
-    image: UploadFile = File(...),
-    latitude: float = Form(...),
-    longitude: float = Form(...),
-    citizen_notes: Optional[str] = Form(None),
-    road_class: Optional[str] = Form("SECONDARY")
-):
+
+@app.post("/api/v1/reports")
+async def report_issue(request: Request):
     try:
-        image_bytes = await image.read()
-        mime_type = image.content_type or "image/jpeg"
+        content_type = request.headers.get("content-type", "")
+        image_bytes = b""
+        mime_type = "image/jpeg"
+        latitude = 17.49367
+        longitude = 78.42035
+        citizen_notes = ""
+        category_input = "POTHOLE"
+        road_class = "ARTERIAL"
 
-        # Stage 1: Vision Agent Analysis
-        vision_result = vision_agent.analyze(image_bytes, mime_type)
+        if "application/json" in content_type:
+            body = await request.json()
+            latitude = float(body.get("latitude") or 17.49367)
+            longitude = float(body.get("longitude") or 78.42035)
+            citizen_notes = body.get("description_text") or body.get("description") or ""
+            category_input = body.get("category") or "POTHOLE"
+            
+            image_uri = body.get("image_uri", "")
+            if image_uri.startswith("data:image"):
+                header, base64_data = image_uri.split(",", 1)
+                mime_type = header.split(";")[0].split(":")[1] if ":" in header else "image/jpeg"
+                image_bytes = base64.b64decode(base64_data)
 
+        elif "multipart/form-data" in content_type:
+            form = await request.form()
+            uploaded_file = form.get("image") or form.get("file")
+            if uploaded_file and hasattr(uploaded_file, "read"):
+                image_bytes = await uploaded_file.read()
+                mime_type = getattr(uploaded_file, "content_type", "image/jpeg") or "image/jpeg"
+            latitude = float(form.get("latitude") or 17.49367)
+            longitude = float(form.get("longitude") or 78.42035)
+            citizen_notes = form.get("citizen_notes") or form.get("description_text") or ""
+            category_input = form.get("category") or "POTHOLE"
+
+        # 1. Vision Analysis & Authenticity Validation
+        vision_result = vision_agent.analyze_image(image_bytes, mime_type)
+
+        # REJECT INVALID IMAGES (e.g. documents, selfies, non-civic)
         if not vision_result.is_valid_civic_issue:
-            return {
-                "success": False,
-                "status": "REJECTED_INVALID_IMAGE",
-                "message": "The uploaded photo does not contain a recognizable municipal infrastructure defect.",
-                "analysis": vision_result.model_dump()
-            }
+            raise HTTPException(
+                status_code=400,
+                detail=vision_result.rejection_reason or "Uploaded photo is not a valid municipal infrastructure hazard."
+            )
 
-        # Mock image storage URL (or GCS bucket upload)
-        mock_image_url = f"https://storage.googleapis.com/{os.getenv('GCS_BUCKET_NAME', 'civicpulse-evidence')}/{uuid.uuid4().hex}.jpg"
-
-        # Stage 2: Incident Agent (BigQuery GIS Deduplication & Spatial Clustering)
-        clustering_result = incident_agent.process_and_cluster(
+        # 2. BigQuery GIS Spatial Deduplication (25m proximity)
+        cluster = incident_agent.process_and_cluster(
             vision_result=vision_result,
             lat=latitude,
             lng=longitude,
             citizen_notes=citizen_notes,
-            image_url=mock_image_url,
             road_class=road_class
         )
 
-        # Stage 3: Operations Agent (Routing & SLA Assignment)
-        ops_result = operations_agent.route_and_assign_sla(
-            incident_id=clustering_result.canonical_incident_id,
+        # 3. Operations SLA Assignment
+        ops = operations_agent.route_and_assign_sla(
+            incident_id=cluster.canonical_incident_id,
             category=vision_result.category,
-            priority_score=clustering_result.updated_priority_score,
+            priority_score=cluster.updated_priority_score,
             lat=latitude,
             lng=longitude
         )
 
-        return {
-            "success": True,
-            "status": "PROCESSED",
-            "vision_telemetry": vision_result.model_dump(),
-            "clustering": clustering_result.model_dump(),
-            "operations_dispatch": ops_result
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# -------------------------------------------------------------
-# 2. CONTRACTOR CLOSED-LOOP VERIFICATION PIPELINE
-# -------------------------------------------------------------
-@app.post("/api/v1/contractor/verify-repair")
-async def verify_contractor_repair(
-    incident_id: str = Form(...),
-    contractor_id: str = Form(...),
-    intake_image: UploadFile = File(...),
-    completion_image: UploadFile = File(...)
-):
-    try:
-        intake_bytes = await intake_image.read()
-        completion_bytes = await completion_image.read()
-        mime_type = intake_image.content_type or "image/jpeg"
-
-        # Stage 4: Resolution Agent (Before/After Visual Verification)
-        verification = resolution_agent.verify_repair(
-            intake_image_bytes=intake_bytes,
-            completion_image_bytes=completion_bytes,
-            mime_type=mime_type
-        )
-
-        # Update BigQuery Incident status based on Verdict
-        project_id = os.getenv("GCP_PROJECT_ID")
-        dataset_id = os.getenv("BIGQUERY_DATASET", "civicpulse_data")
-        client = bigquery.Client(project=project_id)
-        
-        incidents_table = f"{project_id}.{dataset_id}.canonical_incidents"
-        verifications_table = f"{project_id}.{dataset_id}.resolution_verifications"
-
-        new_status = "RESOLVED" if verification.verdict == "PASS" else "AUDIT_FAILED_REOPENED"
-
-        # Update Incident Table
-        update_query = f"""
-            UPDATE `{incidents_table}`
-            SET status = @status, updated_at = CURRENT_TIMESTAMP()
-            WHERE incident_id = @incident_id
-        """
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("status", "STRING", new_status),
-                bigquery.ScalarQueryParameter("incident_id", "STRING", incident_id),
-            ]
-        )
-        client.query(update_query, job_config=job_config).result()
-
-        # Record Verification Audit Entry
-        verification_id = str(uuid.uuid4())
-        insert_verif = f"""
-            INSERT INTO `{verifications_table}` (
-                verification_id, canonical_incident_id, contractor_id, verdict,
-                confidence_score, reasoning, verified_at
-            )
-            VALUES (
-                @verif_id, @inc_id, @contractor_id, @verdict,
-                @conf_score, @reasoning, CURRENT_TIMESTAMP()
-            )
-        """
-        verif_job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("verif_id", "STRING", verification_id),
-                bigquery.ScalarQueryParameter("inc_id", "STRING", incident_id),
-                bigquery.ScalarQueryParameter("contractor_id", "STRING", contractor_id),
-                bigquery.ScalarQueryParameter("verdict", "STRING", verification.verdict),
-                bigquery.ScalarQueryParameter("conf_score", "FLOAT64", verification.confidence_score),
-                bigquery.ScalarQueryParameter("reasoning", "STRING", verification.reasoning),
-            ]
-        )
-        client.query(insert_verif, job_config=verif_job_config).result()
+        prio_label = "Critical" if cluster.updated_priority_score >= 0.8 else ("High" if cluster.updated_priority_score >= 0.5 else "Medium")
 
         return {
             "success": True,
-            "incident_id": incident_id,
-            "new_status": new_status,
-            "verification_audit": verification.model_dump()
+            "incident_id": cluster.canonical_incident_id,
+            "is_duplicate": cluster.is_duplicate,
+            "duplicate_count": cluster.duplicate_count,
+            "dedup_explanation": cluster.explanation,
+            "analysis": {
+                "category": vision_result.category,
+                "severity_level": vision_result.severity_level,
+                "severity_score": vision_result.severity_score,
+                "hazard_type": vision_result.hazard_type,
+                "estimated_dimensions": vision_result.estimated_dimensions_m,
+                "confidence": vision_result.confidence_score
+            },
+            "routing": {
+                "assigned_department": ops.get("assigned_department", "Roads & Highway Infrastructure Dept"),
+                "assigned_ward": ops.get("assigned_ward", "Ward-14"),
+                "priority_level": prio_label,
+                "priority_score": cluster.updated_priority_score,
+                "sla_hours": ops.get("sla_hours", 24),
+                "sla_deadline": ops.get("sla_deadline", "")
+            }
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"Report submission error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# -------------------------------------------------------------
-# 3. ADMIN & OPERATIONS DATA QUERIES
-# -------------------------------------------------------------
 @app.get("/api/v1/incidents")
-def list_canonical_incidents(
-    status: Optional[str] = Query(None),
-    limit: int = Query(50, le=200)
-):
+def list_canonical_incidents(status: Optional[str] = Query(None), limit: int = Query(50, le=200)):
     try:
-        project_id = os.getenv("GCP_PROJECT_ID")
-        dataset_id = os.getenv("BIGQUERY_DATASET", "civicpulse_data")
-        client = bigquery.Client(project=project_id)
-
+        client = bigquery.Client(project=GCP_PROJECT)
         filter_clause = "WHERE status = @status" if status else ""
         query = f"""
             SELECT 
-                incident_id, category, status, priority_score, severity_score, 
-                report_count, road_class, hazard_type, latitude, longitude,
-                primary_image_url, assigned_ward, assigned_department, 
-                sla_deadline, created_at, updated_at
-            FROM `{project_id}.{dataset_id}.canonical_incidents`
+                incident_id, category, latitude, longitude,
+                severity_score, priority_score, duplicate_count,
+                assigned_ward, status, sla_deadline, created_at, updated_at
+            FROM `{GCP_PROJECT}.{BQ_DATASET}.incidents`
             {filter_clause}
-            ORDER BY priority_score DESC, created_at DESC
+            ORDER BY priority_score DESC, updated_at DESC
             LIMIT @limit
         """
         params = [bigquery.ScalarQueryParameter("limit", "INT64", limit)]
         if status:
             params.append(bigquery.ScalarQueryParameter("status", "STRING", status))
 
-        job_config = bigquery.QueryJobConfig(query_parameters=params)
-        rows = client.query(query, job_config=job_config).result()
+        rows = client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        incidents = []
+        for r in rows:
+            rec = dict(r)
+            for k in ["created_at", "updated_at", "sla_deadline"]:
+                if rec.get(k):
+                    rec[k] = str(rec[k])
+            incidents.append(rec)
 
-        incidents = [dict(row) for row in rows]
-        return {
-            "total": len(incidents),
-            "incidents": incidents
-        }
+        return {"total": len(incidents), "incidents": incidents}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -1,67 +1,39 @@
 import os
-import json
 from google import genai
 from google.genai import types
-from PIL import Image
-from schemas.report import VisionAnalysisResult
+from schemas.vision_schema import VisionAnalysisResult
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+VISION_SYSTEM_INSTRUCTION = """
+You are the CivicPulse Vision AI Agent for municipal infrastructure assessment.
+Your role:
+1. Verify if the uploaded image shows a legitimate civic infrastructure issue (Potholes, Streetlights, Drainage/Water leakage, Damaged Roads/Footpaths).
+2. Filter out non-civic photos, indoor images, memes, screenshots, or stock photos by setting is_valid_civic_issue = False.
+3. Compute an objective severity_score (0.0 to 1.0) based on depth, lane obstruction, and hazard to vehicles/pedestrians.
+4. Estimate real-world physical dimensions.
+5. If the issue represents an extreme hazard (e.g., collapsed manhole, exposed live wire, road collapse), set requires_immediate_dispatch = True.
 
-def inspect_image_validity_and_defect(image_path: str) -> VisionAnalysisResult:
-    """
-    Multimodal Vision Agent:
-    1. Audits image integrity (filters spam, selfies, memes, indoor pictures).
-    2. Classifies valid infrastructure hazards and calculates initial severity.
-    """
-    try:
-        image = Image.open(image_path)
-    except Exception as e:
-        return VisionAnalysisResult(
-            is_valid_civic_issue=False,
-            rejection_reason="Unreadable or corrupt image format.",
-            category="Invalid",
-            confidence_score=0.0,
-            severity_level="None",
-            description="Corrupt file upload.",
-            safety_hazard=False
-        )
+Always return structured JSON adhering strictly to the provided schema.
+"""
 
-    system_instruction = """
-    You are the CivicPulse Image Integrity & Triage Guardrail.
-    Your task:
-    1. Inspect if the image is authentic photographic evidence of a public municipal hazard (e.g., potholes, broken road, damaged streetlights, hanging power lines, overflowing drains, illegal solid waste dumping).
-    2. REJECT (is_valid_civic_issue = false) if the photo is:
-       - Selfies, faces, people portraits
-       - Indoor rooms, bedrooms, kitchens
-       - Food, pets, animals, documents, text screenshots, memes
-       - Completely dark, blurry, or unidentifiable scenes
-    3. If valid, classify category ('Pothole', 'Streetlight', 'Drainage', 'Garbage') and estimate severity ('Low', 'Medium', 'High', 'Critical').
-    """
+class VisionAgent:
+    def __init__(self):
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is missing.")
+        self.client = genai.Client(api_key=api_key)
 
-    prompt = "Inspect this uploaded citizen image. Output strictly valid JSON matching the VisionAnalysisResult schema."
-
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[image, prompt],
+    def analyze(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> VisionAnalysisResult:
+        response = self.client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                "Analyze this municipal infrastructure report photo and extract structured civic telemetry."
+            ],
             config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
+                system_instruction=VISION_SYSTEM_INSTRUCTION,
                 response_mime_type="application/json",
                 response_schema=VisionAnalysisResult,
-                temperature=0.1
+                temperature=0.1,
             )
         )
-        data = json.loads(response.text)
-        return VisionAnalysisResult(**data)
-    except Exception as err:
-        print(f"[Vision Agent Fallback] {err}")
-        # Default safe fallback for testing if API key is not yet set
-        return VisionAnalysisResult(
-            is_valid_civic_issue=True,
-            rejection_reason=None,
-            category="Pothole",
-            confidence_score=0.95,
-            severity_level="High",
-            description="Verified road surface defect.",
-            safety_hazard=True
-        )
+        return VisionAnalysisResult.model_validate_json(response.text)

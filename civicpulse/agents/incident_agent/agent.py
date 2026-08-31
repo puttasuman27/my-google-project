@@ -1,141 +1,186 @@
-# agents/incident_agent/agent.py
+import os
+import uuid
+from datetime import datetime, timezone
+from google.cloud import bigquery
+from schemas.vision_schema import VisionAnalysisResult
+from schemas.incident_schema import DeduplicationResult
 
-import math
-import sys
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+class IncidentAgent:
+    def __init__(self):
+        self.project_id = os.getenv("GCP_PROJECT_ID")
+        self.dataset_id = os.getenv("BIGQUERY_DATASET", "civicpulse_data")
+        self.client = bigquery.Client(project=self.project_id)
 
-# Dynamically ensure project root directory is on sys.path
-project_root = Path(__file__).resolve().parents[2]
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
+    def calculate_priority(self, severity_score: float, report_count: int, road_class: str) -> float:
+        """
+        Priority Score Formula:
+        (Severity * 0.35) + (Report_Count_Weight * 0.25) + (Road_Class_Impact * 0.40)
+        """
+        # Diminishing returns on report count weight (maxes at 1.0 for 10+ reports)
+        report_count_weight = min(report_count / 10.0, 1.0)
 
-from dotenv import load_dotenv
+        # Road class impact factor
+        road_impact_map = {
+            "PRIMARY_ARTERIAL": 1.0,
+            "SECONDARY": 0.65,
+            "RESIDENTIAL": 0.35
+        }
+        road_class_impact = road_impact_map.get(road_class.upper(), 0.5)
 
-load_dotenv()
+        priority = (severity_score * 0.35) + (report_count_weight * 0.25) + (road_class_impact * 0.40)
+        return round(min(priority, 1.0), 3)
 
-from google.adk.agents import Agent
-from schemas.incident import IncidentMatchResult
+    def process_and_cluster(
+        self,
+        vision_result: VisionAnalysisResult,
+        lat: float,
+        lng: float,
+        citizen_notes: str,
+        image_url: str,
+        road_class: str = "SECONDARY"
+    ) -> DeduplicationResult:
+        """
+        Executes BigQuery GIS spatial query (ST_DWithin 25m over 72h window) to deduplicate or create incident.
+        """
+        table_ref = f"{self.project_id}.{self.dataset_id}.incidents"
+        submissions_table_ref = f"{self.project_id}.{self.dataset_id}.raw_submissions"
 
-
-def calculate_haversine_distance(
-    lat1: float, lon1: float, lat2: float, lon2: float
-) -> float:
-    """Calculates the great-circle distance between two GPS coordinates in meters.
-
-    Args:
-        lat1: Latitude of the first coordinate point.
-        lon1: Longitude of the first coordinate point.
-        lat2: Latitude of the second coordinate point.
-        lon2: Longitude of the second coordinate point.
-
-    Returns:
-        float: Distance between points in meters.
-    """
-    R = 6371000.0  # Earth radius in meters
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    delta_phi = math.radians(lat2 - lat1)
-    delta_lambda = math.radians(lon2 - lon1)
-
-    a = (
-        math.sin(delta_phi / 2.0) ** 2
-        + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0) ** 2
-    )
-    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
-    return R * c
-
-
-def evaluate_spatial_deduplication(
-    report_category: str,
-    report_lat: float,
-    report_lng: float,
-    active_incidents: List[Dict[str, Any]],
-    max_radius_meters: float = 50.0,
-) -> IncidentMatchResult:
-    """Evaluates active municipal incidents against new report parameters to detect
-    duplicates within a specified geographical radius.
-
-    Args:
-        report_category: Issue category (e.g., 'Pothole', 'Streetlight', 'Drainage').
-        report_lat: Latitude of the incoming report.
-        report_lng: Longitude of the incoming report.
-        active_incidents: List of currently open/active incident dictionaries containing
-            'incident_id', 'category', 'latitude', and 'longitude'.
-        max_radius_meters: Search radius in meters for deduplication (default 50.0).
-
-    Returns:
-        IncidentMatchResult: Structured result indicating duplicate status, matching ID,
-            confidence score, and explanation.
-    """
-    candidate_matches = []
-
-    for incident in active_incidents:
-        # Require matching category before evaluating distance
-        if incident.get("category") != report_category:
-            continue
-
-        try:
-            inc_lat = float(incident["latitude"])
-            inc_lng = float(incident["longitude"])
-        except (KeyError, TypeError, ValueError):
-            continue
-
-        distance = calculate_haversine_distance(
-            report_lat,
-            report_lng,
-            inc_lat,
-            inc_lng,
+        # 1. Query for nearby matching active incidents within 25 meters in past 72 hours
+        query = f"""
+            SELECT 
+                incident_id, 
+                report_count, 
+                severity_score, 
+                road_class,
+                ST_DISTANCE(location, ST_GEOGPOINT(@lng, @lat)) as distance_meters
+            FROM `{table_ref}`
+            WHERE 
+                category = @category
+                AND status != 'RESOLVED'
+                AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)
+                AND ST_DWITHIN(location, ST_GEOGPOINT(@lng, @lat), 25.0)
+            ORDER BY distance_meters ASC
+            LIMIT 1
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("category", "STRING", vision_result.category),
+                bigquery.ScalarQueryParameter("lng", "FLOAT64", lng),
+                bigquery.ScalarQueryParameter("lat", "FLOAT64", lat),
+            ]
         )
+        query_job = self.client.query(query, job_config=job_config)
+        results = list(query_job.result())
 
-        if distance <= max_radius_meters:
-            candidate_matches.append((distance, incident))
+        submission_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
 
-    if not candidate_matches:
-        return IncidentMatchResult(
-            is_duplicate=False,
-            matched_incident_id=None,
-            confidence=0.98,
-            explanation=(
-                f"No active '{report_category}' incidents detected within "
-                f"{max_radius_meters}m radius. Initializing new canonical incident."
-            ),
-            distance_meters=None,
+        if results:
+            # MATCH FOUND: Deduplicate and update Canonical Incident
+            match = results[0]
+            canonical_id = match.incident_id
+            new_report_count = match.report_count + 1
+            matched_distance = float(match.distance_meters)
+
+            # Max severity of existing vs new report
+            combined_severity = max(match.severity_score, vision_result.severity_score)
+            new_priority = self.calculate_priority(combined_severity, new_report_count, match.road_class or road_class)
+
+            update_query = f"""
+                UPDATE `{table_ref}`
+                SET 
+                    report_count = @report_count,
+                    priority_score = @priority_score,
+                    severity_score = @severity_score,
+                    updated_at = TIMESTAMP(@now)
+                WHERE incident_id = @incident_id
+            """
+            update_job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("report_count", "INT64", new_report_count),
+                    bigquery.ScalarQueryParameter("priority_score", "FLOAT64", new_priority),
+                    bigquery.ScalarQueryParameter("severity_score", "FLOAT64", combined_severity),
+                    bigquery.ScalarQueryParameter("now", "STRING", now),
+                    bigquery.ScalarQueryParameter("incident_id", "STRING", canonical_id),
+                ]
+            )
+            self.client.query(update_query, job_config=update_job_config).result()
+
+            # Record raw submission linked to canonical incident
+            self._insert_submission(submissions_table_ref, submission_id, canonical_id, citizen_notes, image_url, lat, lng, now)
+
+            return DeduplicationResult(
+                is_duplicate=True,
+                canonical_incident_id=canonical_id,
+                matched_distance_meters=round(matched_distance, 2),
+                action_taken="ATTACHED_TO_EXISTING",
+                updated_priority_score=new_priority,
+                total_reports=new_report_count
+            )
+
+        else:
+            # NO MATCH: Create new Canonical Incident
+            canonical_id = f"INC-{uuid.uuid4().hex[:8].upper()}"
+            initial_priority = self.calculate_priority(vision_result.severity_score, 1, road_class)
+
+            insert_query = f"""
+                INSERT INTO `{table_ref}` (
+                    incident_id, category, status, priority_score, severity_score, 
+                    report_count, road_class, hazard_type, location, latitude, longitude, 
+                    primary_image_url, created_at, updated_at
+                )
+                VALUES (
+                    @incident_id, @category, 'OPEN', @priority_score, @severity_score,
+                    1, @road_class, @hazard_type, ST_GEOGPOINT(@lng, @lat), @lat, @lng,
+                    @primary_image_url, TIMESTAMP(@now), TIMESTAMP(@now)
+                )
+            """
+            insert_job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("incident_id", "STRING", canonical_id),
+                    bigquery.ScalarQueryParameter("category", "STRING", vision_result.category),
+                    bigquery.ScalarQueryParameter("priority_score", "FLOAT64", initial_priority),
+                    bigquery.ScalarQueryParameter("severity_score", "FLOAT64", vision_result.severity_score),
+                    bigquery.ScalarQueryParameter("road_class", "STRING", road_class),
+                    bigquery.ScalarQueryParameter("hazard_type", "STRING", vision_result.hazard_type),
+                    bigquery.ScalarQueryParameter("lat", "FLOAT64", lat),
+                    bigquery.ScalarQueryParameter("lng", "FLOAT64", lng),
+                    bigquery.ScalarQueryParameter("primary_image_url", "STRING", image_url),
+                    bigquery.ScalarQueryParameter("now", "STRING", now),
+                ]
+            )
+            self.client.query(insert_query, job_config=insert_job_config).result()
+
+            # Record raw submission
+            self._insert_submission(submissions_table_ref, submission_id, canonical_id, citizen_notes, image_url, lat, lng, now)
+
+            return DeduplicationResult(
+                is_duplicate=False,
+                canonical_incident_id=canonical_id,
+                matched_distance_meters=None,
+                action_taken="CREATED_NEW",
+                updated_priority_score=initial_priority,
+                total_reports=1
+            )
+
+    def _insert_submission(self, table_ref: str, sub_id: str, can_id: str, notes: str, img: str, lat: float, lng: float, now: str):
+        query = f"""
+            INSERT INTO `{table_ref}` (
+                submission_id, canonical_incident_id, citizen_notes, image_url, location, latitude, longitude, submitted_at
+            )
+            VALUES (
+                @sub_id, @can_id, @notes, @img, ST_GEOGPOINT(@lng, @lat), @lat, @lng, TIMESTAMP(@now)
+            )
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("sub_id", "STRING", sub_id),
+                bigquery.ScalarQueryParameter("can_id", "STRING", can_id),
+                bigquery.ScalarQueryParameter("notes", "STRING", notes or ""),
+                bigquery.ScalarQueryParameter("img", "STRING", img or ""),
+                bigquery.ScalarQueryParameter("lat", "FLOAT64", lat),
+                bigquery.ScalarQueryParameter("lng", "FLOAT64", lng),
+                bigquery.ScalarQueryParameter("now", "STRING", now),
+            ]
         )
-
-    # Select closest matching incident within threshold
-    candidate_matches.sort(key=lambda item: item[0])
-    closest_dist, matched_incident = candidate_matches[0]
-
-    # Calculate confidence based on proximity relative to max radius
-    proximity_confidence = min(
-        1.0, max(0.70, 1.0 - (closest_dist / max_radius_meters) * 0.3)
-    )
-
-    return IncidentMatchResult(
-        is_duplicate=True,
-        matched_incident_id=str(matched_incident["incident_id"]),
-        confidence=round(proximity_confidence, 2),
-        explanation=(
-            f"Merged report into active incident '{matched_incident['incident_id']}'. "
-            f"Located {closest_dist:.1f}m away with matching category '{report_category}'."
-        ),
-        distance_meters=round(closest_dist, 2),
-    )
-
-
-# Configure ADK Agent for Incident Intelligence & Deduplication
-incident_agent = Agent(
-    name="incident_agent",
-    model="gemini-3.6-flash",
-    instruction=(
-        "You are the Incident Intelligence & Spatial Deduplication Agent for CivicPulse AI. "
-        "Your mission is to process incoming citizen reports, evaluate active incidents within a 50-meter radius, "
-        "and determine whether a report is a duplicate that should be consolidated into an existing canonical incident "
-        "or if a new incident record must be established. Produce strictly structured JSON decisions matching IncidentMatchResult."
-    ),
-    output_schema=IncidentMatchResult,
-    tools=[calculate_haversine_distance, evaluate_spatial_deduplication],
-)
-
-# Root entrypoint for ADK web loader
-root_agent = incident_agent
+        self.client.query(query, job_config=job_config).result()

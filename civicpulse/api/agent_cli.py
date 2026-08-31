@@ -25,7 +25,7 @@ class {class_prefix}Agent:
 
     def execute(self, prompt: str) -> {class_prefix}Result:
         response = self.client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
