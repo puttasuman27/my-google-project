@@ -8,7 +8,7 @@ project_root = Path(__file__).resolve().parents[1]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from agents.incident_agent.agent import (
+from agents.incident_agent import (
     calculate_haversine_distance,
     evaluate_spatial_deduplication,
 )
