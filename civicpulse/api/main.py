@@ -2,7 +2,7 @@ import os
 import uuid
 import base64
 from typing import Optional
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from google.cloud import bigquery
@@ -58,7 +58,7 @@ async def report_issue(request: Request):
             category_input = body.get("category") or "POTHOLE"
             
             image_uri = body.get("image_uri", "")
-            if image_uri.startswith("data:image"):
+            if image_uri and image_uri.startswith("data:image"):
                 header, base64_data = image_uri.split(",", 1)
                 mime_type = header.split(";")[0].split(":")[1] if ":" in header else "image/jpeg"
                 image_bytes = base64.b64decode(base64_data)
@@ -77,14 +77,14 @@ async def report_issue(request: Request):
         # 1. Vision Analysis & Authenticity Validation
         vision_result = vision_agent.analyze_image(image_bytes, mime_type)
 
-        # REJECT INVALID IMAGES (e.g. documents, selfies, non-civic)
+        # REJECT INVALID / NON-CIVIC PHOTOS (documents, selfies, screenshots, etc.)
         if not vision_result.is_valid_civic_issue:
             raise HTTPException(
                 status_code=400,
                 detail=vision_result.rejection_reason or "Uploaded photo is not a valid municipal infrastructure hazard."
             )
 
-        # 2. BigQuery GIS Spatial Deduplication (25m proximity)
+        # 2. BigQuery GIS Spatial Deduplication (50m proximity)
         cluster = incident_agent.process_and_cluster(
             vision_result=vision_result,
             lat=latitude,
@@ -139,14 +139,34 @@ async def report_issue(request: Request):
 def list_canonical_incidents(status: Optional[str] = Query(None), limit: int = Query(50, le=200)):
     try:
         client = bigquery.Client(project=GCP_PROJECT)
-        filter_clause = "WHERE status = @status" if status else ""
+        
+        conditions = [
+            "category IS NOT NULL",
+            "category != ''",
+            "latitude IS NOT NULL",
+            "longitude IS NOT NULL"
+        ]
+        if status:
+            conditions.append("status = @status")
+        
+        where_clause = "WHERE " + " AND ".join(conditions)
+
         query = f"""
             SELECT 
-                incident_id, category, latitude, longitude,
-                severity_score, priority_score, duplicate_count,
-                assigned_ward, status, sla_deadline, created_at, updated_at
+                incident_id, 
+                category, 
+                latitude, 
+                longitude,
+                COALESCE(severity_score, 0.5) AS severity_score, 
+                COALESCE(priority_score, 0.5) AS priority_score, 
+                COALESCE(duplicate_count, 1) AS duplicate_count,
+                COALESCE(assigned_ward, 'Ward-14') AS assigned_ward, 
+                COALESCE(status, 'OPEN') AS status, 
+                sla_deadline, 
+                created_at, 
+                updated_at
             FROM `{GCP_PROJECT}.{BQ_DATASET}.incidents`
-            {filter_clause}
+            {where_clause}
             ORDER BY priority_score DESC, updated_at DESC
             LIMIT @limit
         """
@@ -155,6 +175,7 @@ def list_canonical_incidents(status: Optional[str] = Query(None), limit: int = Q
             params.append(bigquery.ScalarQueryParameter("status", "STRING", status))
 
         rows = client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        
         incidents = []
         for r in rows:
             rec = dict(r)
@@ -165,4 +186,5 @@ def list_canonical_incidents(status: Optional[str] = Query(None), limit: int = Q
 
         return {"total": len(incidents), "incidents": incidents}
     except Exception as e:
+        print(f"Fetch incidents error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

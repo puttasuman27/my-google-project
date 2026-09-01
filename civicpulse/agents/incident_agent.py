@@ -5,6 +5,7 @@ from typing import Any, Iterable, Optional
 from google.cloud import bigquery
 from pydantic import BaseModel
 
+
 class IncidentClusteringResult(BaseModel):
     canonical_incident_id: str
     is_duplicate: bool
@@ -42,11 +43,11 @@ def evaluate_spatial_deduplication(
     report_lat: float,
     report_lng: float,
     active_incidents: Iterable[dict[str, Any]],
-    max_radius_meters: float = 25.0,
+    max_radius_meters: float = 50.0,
 ) -> SpatialDeduplicationResult:
     matching_incidents = []
     for incident in active_incidents:
-        if str(incident.get("category", "")).upper() != report_category.upper():
+        if str(incident.get("category", "")).upper().strip() != report_category.upper().strip():
             continue
 
         distance_meters = calculate_haversine_distance(
@@ -70,11 +71,12 @@ def evaluate_spatial_deduplication(
 
 
 class IncidentAgent:
-    def __init__(self):
+    def __init__(self, radius_meters: float = 50.0):
         self.project_id = os.getenv("GCP_PROJECT_ID", "civicpulse-app-505811")
         self.dataset_id = os.getenv("BIGQUERY_DATASET", "civicpulse_analytics")
         self.client = bigquery.Client(project=self.project_id)
-        self.radius_meters = 25.0
+        # 50 meter clustering radius
+        self.radius_meters = float(os.getenv("INCIDENT_DEDUP_RADIUS_M", radius_meters))
 
     @staticmethod
     def calculate_priority(severity_score: float, report_count: int, road_class: str) -> float:
@@ -84,7 +86,7 @@ class IncidentAgent:
             "COLLECTOR": 0.5,
             "SECONDARY": 0.5,
             "LOCAL": 0.2,
-        }.get(road_class.upper(), 0.2)
+        }.get(str(road_class).upper(), 0.2)
         report_count_weight = min(report_count / 10.0, 1.0)
         priority = (
             severity_score * 0.35
@@ -102,22 +104,28 @@ class IncidentAgent:
         image_url: str = "",
         road_class: str = "ARTERIAL"
     ) -> IncidentClusteringResult:
-        category = getattr(vision_result, "category", "POTHOLE")
-        severity = getattr(vision_result, "severity_score", 0.85)
+        category = str(getattr(vision_result, "category", "POTHOLE")).upper().strip()
+        severity = float(getattr(vision_result, "severity_score", 0.85))
         table_ref = f"`{self.project_id}.{self.dataset_id}.incidents`"
 
-        # 1. BigQuery GIS Query: Find any active incident within 25 meters
+        # 1. BigQuery GIS Spatial Deduplication Query
         query = f"""
             SELECT 
                 incident_id,
                 duplicate_count,
                 priority_score,
-                ST_DISTANCE(location, ST_GEOGPOINT(@lng, @lat)) AS distance_m
+                ST_DISTANCE(
+                    COALESCE(location, ST_GEOGPOINT(longitude, latitude)),
+                    ST_GEOGPOINT(@lng, @lat)
+                ) AS distance_m
             FROM {table_ref}
-            WHERE category = @category
-              AND status != 'RESOLVED'
-                            AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)
-              AND ST_DWITHIN(location, ST_GEOGPOINT(@lng, @lat), @radius)
+            WHERE UPPER(TRIM(category)) = @category
+              AND (UPPER(status) != 'RESOLVED' OR status IS NULL)
+              AND ST_DWITHIN(
+                  COALESCE(location, ST_GEOGPOINT(longitude, latitude)),
+                  ST_GEOGPOINT(@lng, @lat),
+                  @radius
+              )
             ORDER BY distance_m ASC
             LIMIT 1
         """
@@ -137,10 +145,8 @@ class IncidentAgent:
             match = rows[0]
             canonical_id = match["incident_id"]
             new_count = int(match["duplicate_count"] or 1) + 1
-            
             new_prio = self.calculate_priority(severity, new_count, road_class)
 
-            # Update existing row in BigQuery
             update_query = f"""
                 UPDATE {table_ref}
                 SET 
@@ -203,6 +209,7 @@ class IncidentAgent:
             updated_priority_score=initial_prio,
             explanation="New canonical incident created with GIS point partition."
         )
+
 
 __all__ = [
     "IncidentAgent",
