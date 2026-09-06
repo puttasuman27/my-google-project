@@ -1,30 +1,35 @@
 import React, { useState, useEffect } from 'react';
 import ReportIssueModal from './components/ReportIssueModal';
+import AdminPortal from './components/AdminPortal';
+import IncidentFeed from './components/IncidentFeed';
+import AccessPortalPage from './components/AccessPortalPage';
+import MissionGoals from './components/MissionGoals';
 import heroBg from './assets/bg.png';
 import {
   Camera,
-  MapPin,
-  CheckCircle2,
-  Flame,
   SlidersHorizontal,
   ShieldCheck,
   TrendingUp,
-  Clock,
   Sparkles,
-  ThumbsUp,
   Mail,
   Phone,
   ArrowRight,
   Building2,
   TreePine,
-  RefreshCw,
-  Search,
   Layers,
-  X
+  X,
+  Play,
+  Pause,
+  Clock,
+  CheckCircle2,
+  AlertTriangle,
+  User,
+  LogOut,
+  Target
 } from 'lucide-react';
 
 const normalizeIncident = (item) => {
-  const id = item.incident_id || item.id || `inc_${Math.random().toString(36).substring(2, 9)}`;
+  const id = item.incident_id || item.id || `INC-${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
   const cat = (item.category || "POTHOLE").toUpperCase();
   const ward = item.assigned_ward || item.ward || "Ward 14 - Central Core";
   const lat = item.latitude ? Number(item.latitude).toFixed(4) : null;
@@ -43,6 +48,8 @@ const normalizeIncident = (item) => {
     title: item.title || `${cat} Hazard`,
     category: cat,
     location: loc,
+    latitude: item.latitude || 17.49367,
+    longitude: item.longitude || 78.42035,
     ward: ward,
     severity: item.severity || severity,
     severityScore: prioScore,
@@ -50,24 +57,57 @@ const normalizeIncident = (item) => {
     userUpvoted: !!item.userUpvoted,
     department: item.department || (cat === "POTHOLE" ? "Roads & Highway Infrastructure Dept" : "Public Works Department"),
     slaCountdown: item.sla_deadline ? "SLA Active" : (item.slaCountdown || "12h SLA remaining"),
-    status: item.status || "IN_PROGRESS",
+    status: (item.status || "OPEN").toUpperCase().trim(),
     reportsMerged: reportsMerged,
-    image: item.image || "https://images.unsplash.com/photo-1515162816999-a0c47dc192f7?auto=format&fit=crop&w=800&q=80"
+    intake_image_url: item.intake_image_url || item.image || "",
+    resolved_image_url: item.resolved_image_url || "",
+    image: item.intake_image_url || item.image || ""
   };
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('home'); // 'home' | 'portal'
+  const [activeTab, setActiveTab] = useState('home'); // 'home' | 'portal' | 'goals' | 'access'
   const [incidents, setIncidents] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [sliderPos, setSliderPos] = useState(50);
-  const [showReportModal, setShowReportModal] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedWard, setSelectedWard] = useState('ALL');
-  const [feedbackSuccess, setFeedbackSuccess] = useState(false);
 
-  // 🔔 Floating Toast Notification State
+  // 🔐 Authenticated User Profile (Defaults to verified admin for immediate testing)
+  const [currentUser, setCurrentUser] = useState({
+    name: "Sumanth Puttaswamy",
+    email: "puttasuman27@gmail.com",
+    role: "MUNICIPAL_COMMISSIONER",
+    designation: "Chief Municipal Operations Officer",
+    assigned_ward: "ALL",
+    is_verified_admin: true
+  });
+
+  // Auto-Sliding Before & After State
+  const [sliderPos, setSliderPos] = useState(50);
+  const [isAutoSliding, setIsAutoSliding] = useState(true);
+  const [sliderDirection, setSliderDirection] = useState(1);
+
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [feedbackSuccess, setFeedbackSuccess] = useState(false);
   const [toastNotification, setToastNotification] = useState(null);
+
+  useEffect(() => {
+    if (!isAutoSliding) return;
+    const interval = setInterval(() => {
+      setSliderPos((prev) => {
+        let next = prev + sliderDirection * 1.2;
+        if (next >= 88) {
+          setSliderDirection(-1);
+          return 88;
+        }
+        if (next <= 12) {
+          setSliderDirection(1);
+          return 12;
+        }
+        return next;
+      });
+    }, 40);
+
+    return () => clearInterval(interval);
+  }, [isAutoSliding, sliderDirection]);
 
   const showToast = (toast) => {
     setToastNotification(toast);
@@ -101,7 +141,8 @@ export default function App() {
 
   const toggleUpvote = (id) => {
     setIncidents(prev => prev.map(item => {
-      if (item.id === id) {
+      const currentId = item.incident_id || item.id;
+      if (currentId === id) {
         return {
           ...item,
           upvotes: item.userUpvoted ? item.upvotes - 1 : item.upvotes + 1,
@@ -112,12 +153,31 @@ export default function App() {
     }));
   };
 
-  // 🔄 Add or merge new report (Modal stays open until citizen clicks Done)
+  const handleStatusChange = (targetId, newStatus) => {
+    setIncidents(prev => prev.map(item => {
+      const currentId = (item.incident_id || item.id).trim();
+      if (currentId === targetId.trim()) {
+        return { ...item, status: newStatus };
+      }
+      return item;
+    }));
+
+    showToast({
+      type: 'status',
+      title: 'Status Updated',
+      message: `Incident #${targetId} updated to ${newStatus}.`,
+      id: targetId
+    });
+
+    fetchIncidentsFromBQ();
+  };
+
   const handleAddNewReport = (newIncident, rawAgentResponse) => {
     const normalized = normalizeIncident(newIncident);
+    const targetId = (normalized.incident_id || normalized.id).trim();
 
     setIncidents(prev => {
-      const existingIndex = prev.findIndex(item => item.id === normalized.id);
+      const existingIndex = prev.findIndex(item => (item.incident_id || item.id).trim() === targetId);
       if (existingIndex !== -1) {
         const updated = [...prev];
         updated[existingIndex] = {
@@ -132,31 +192,45 @@ export default function App() {
       return [normalized, ...prev];
     });
 
-    // Trigger dashboard toast notification
     if (rawAgentResponse?.is_duplicate) {
       showToast({
         type: 'merge',
         title: 'Report Merged into Existing Cluster',
-        message: `Matched canonical defect #${rawAgentResponse.incident_id} (${rawAgentResponse.duplicate_count} merged total)`,
+        message: `Matched canonical defect #${rawAgentResponse.incident_id} (${rawAgentResponse.duplicate_count} reports merged total)`,
         id: rawAgentResponse.incident_id
       });
     } else {
       showToast({
         type: 'create',
         title: 'New Canonical Incident Created',
-        message: `Registered as #${rawAgentResponse?.incident_id || normalized.id} in BigQuery GIS warehouse`,
-        id: rawAgentResponse?.incident_id || normalized.id
+        message: `Registered as #${rawAgentResponse?.incident_id || targetId} in BigQuery GIS warehouse`,
+        id: rawAgentResponse?.incident_id || targetId
       });
     }
   };
 
-  const filteredIncidents = incidents.filter(inc => {
-    const term = searchQuery.toLowerCase();
-    const titleMatch = inc.title ? inc.title.toLowerCase().includes(term) : false;
-    const locationMatch = inc.location ? inc.location.toLowerCase().includes(term) : false;
-    const categoryMatch = inc.category ? inc.category.toLowerCase().includes(term) : false;
-    return titleMatch || locationMatch || categoryMatch;
-  });
+  const handleAdminPortalClick = () => {
+    if (currentUser?.is_verified_admin) {
+      setActiveTab('portal');
+    } else {
+      setActiveTab('access');
+    }
+  };
+
+  const activeShowcase = incidents.find(i => i.status === 'RESOLVED' && i.resolved_image_url)
+    || incidents[0]
+    || {
+      id: "INC-5C63F1C5",
+      title: "Drainage Defect",
+      ward: "Ward-49",
+      location: "Ward-49 (17.4946, 78.4369)",
+      category: "DRAINAGE",
+      status: "IN_PROGRESS"
+    };
+
+  const hasIntakePhoto = !!activeShowcase.intake_image_url;
+  const hasResolvedPhoto = !!activeShowcase.resolved_image_url;
+  const isResolved = activeShowcase.status === 'RESOLVED';
 
   return (
     <div className="min-h-screen bg-[#F4F8F6] text-slate-800 font-sans flex flex-col items-center relative">
@@ -164,11 +238,7 @@ export default function App() {
       {/* 🔔 FLOATING TOAST NOTIFICATION */}
       {toastNotification && (
         <div className="fixed top-20 right-5 z-[9999] max-w-md w-full animate-in slide-in-from-top-4 duration-300">
-          <div className={`p-4 rounded-2xl shadow-2xl border flex items-start justify-between gap-3 ${
-            toastNotification.type === 'merge'
-              ? 'bg-[#0B4D3C] text-white border-emerald-700'
-              : 'bg-[#0B4D3C] text-white border-emerald-700'
-          }`}>
+          <div className="p-4 rounded-2xl shadow-2xl border flex items-start justify-between gap-3 bg-[#0B4D3C] text-white border-emerald-700">
             <div className="flex items-start gap-3">
               <div className="p-2 rounded-xl bg-[#F97316] text-white shrink-0 mt-0.5">
                 {toastNotification.type === 'merge' ? <Layers className="w-5 h-5" /> : <Sparkles className="w-5 h-5" />}
@@ -209,36 +279,86 @@ export default function App() {
           <nav className="flex items-center space-x-2">
             <button
               onClick={() => setActiveTab('home')}
-              className={`px-4 py-2 rounded-xl text-xs font-bold transition ${
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition ${
                 activeTab === 'home' ? 'bg-white text-[#0B4D3C]' : 'text-emerald-100 hover:text-white'
               }`}
             >
               Citizen Hub
             </button>
+
+            <button
+              onClick={() => setActiveTab('goals')}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition ${
+                activeTab === 'goals' ? 'bg-white text-[#0B4D3C]' : 'text-emerald-100 hover:text-white'
+              }`}
+            >
+              Mission & Goals
+            </button>
+
             <button
               onClick={() => setShowReportModal(true)}
-              className="bg-[#F97316] hover:bg-orange-600 text-white font-bold text-xs px-4 py-2 rounded-xl shadow-sm flex items-center space-x-1.5 transition active:scale-95"
+              className="bg-[#F97316] hover:bg-orange-600 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow-sm flex items-center space-x-1.5 transition active:scale-95"
             >
               <Camera className="w-3.5 h-3.5" />
               <span>Report Issue</span>
             </button>
+
             <button
-              onClick={() => setActiveTab('portal')}
-              className={`px-4 py-2 rounded-xl text-xs font-bold transition ${
+              onClick={handleAdminPortalClick}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
                 activeTab === 'portal' ? 'bg-[#10B981] text-slate-950 font-black' : 'text-emerald-100 hover:text-white'
               }`}
             >
-              Admin Portal
+              <Building2 className="w-3.5 h-3.5" />
+              <span>Admin Portal</span>
             </button>
+
+            {/* Dedicated Role & Login Full-Page Button */}
+            {currentUser?.is_verified_admin ? (
+              <button
+                onClick={() => setActiveTab('access')}
+                className={`ml-2 border px-3 py-1.5 rounded-xl cursor-pointer flex items-center gap-1.5 transition ${
+                  activeTab === 'access'
+                    ? 'bg-white text-[#0B4D3C] border-white'
+                    : 'bg-emerald-950/80 hover:bg-emerald-950 border-emerald-400/30'
+                }`}
+              >
+                <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></div>
+                <div className="text-left leading-none">
+                  <span className={`text-[10px] font-black block ${activeTab === 'access' ? 'text-[#0B4D3C]' : 'text-emerald-300'}`}>
+                    Verified Official
+                  </span>
+                  <span className={`text-[9px] font-semibold ${activeTab === 'access' ? 'text-slate-600' : 'text-slate-300'}`}>
+                    {currentUser.name.split(' ')[0]}
+                  </span>
+                </div>
+              </button>
+            ) : (
+              <button
+                onClick={() => setActiveTab('access')}
+                className={`ml-2 border px-3.5 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
+                  activeTab === 'access'
+                    ? 'bg-white text-[#0B4D3C] border-white'
+                    : 'bg-white/10 hover:bg-white/20 border-white/20 text-white'
+                }`}
+              >
+                <User className="w-3.5 h-3.5" />
+                <span>Sign In / Role</span>
+              </button>
+            )}
           </nav>
         </div>
       </header>
 
-      {/* 2. MAIN HUB CONTENT */}
+      {/* 2. MAIN CONTENT VIEW CONTROLLER */}
       <main className="w-full max-w-6xl px-4 sm:px-6 py-6 space-y-8 flex-1">
+        
         {activeTab === 'home' ? (
+          /* ========================================================= */
+          /* CITIZEN HUB VIEW                                          */
+          /* ========================================================= */
           <>
-            {/* HERO SECTION */}
+            {/* HERO BANNER */}
             <section
               className="relative w-full rounded-[36px] overflow-hidden shadow-xl bg-cover bg-center border border-emerald-900/20"
               style={{
@@ -279,7 +399,7 @@ export default function App() {
               </div>
             </section>
 
-            {/* KPI BAR */}
+            {/* KPI METRICS */}
             <section className="grid grid-cols-2 sm:grid-cols-4 gap-4">
               <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
                 <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Active Incident Clusters</span>
@@ -290,7 +410,9 @@ export default function App() {
               </div>
               <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
                 <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">AI Deduplication</span>
-                <div className="text-2xl sm:text-3xl font-black text-[#0B4D3C] mt-1">68.4%</div>
+                <div className="text-2xl sm:text-3xl font-black text-[#0B4D3C] mt-1">
+                  {incidents.length > 0 ? '68.4%' : '0%'}
+                </div>
                 <span className="text-[10px] text-slate-400 font-semibold mt-1 block">50m spatial clustering</span>
               </div>
               <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
@@ -300,79 +422,87 @@ export default function App() {
               </div>
               <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
                 <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Verified Resolution</span>
-                <div className="text-2xl sm:text-3xl font-black text-[#10B981] mt-1">99.1%</div>
+                <div className="text-2xl sm:text-3xl font-black text-[#10B981] mt-1">
+                  {incidents.filter(i => i.status === 'RESOLVED').length} Done
+                </div>
                 <span className="text-[10px] text-slate-400 font-semibold mt-1 block">Zero false closures</span>
               </div>
             </section>
 
-            {/* MOTTO & PILLARS */}
-            <section className="bg-emerald-900/5 border border-emerald-900/10 p-6 sm:p-8 rounded-[32px] flex flex-col md:flex-row items-center justify-between gap-6">
-              <div className="space-y-1 text-center md:text-left">
-                <span className="text-xs font-black uppercase text-[#0B4D3C] tracking-wider">Our Community Creed</span>
-                <h3 className="text-2xl font-black text-slate-900">Empowering Spotless, Safe Neighborhoods</h3>
-                <p className="text-xs sm:text-sm text-slate-600 max-w-xl">
-                  We don't just count complaints. CivicPulse connects citizen awareness with municipal field action through automated triage, eliminating paperwork and accelerating physical repairs.
-                </p>
-              </div>
-
-              <div className="flex gap-3">
-                <div className="bg-white p-4 rounded-2xl border border-emerald-100 text-center w-28 shadow-sm">
-                  <div className="w-8 h-8 rounded-full bg-emerald-100 text-[#0B4D3C] flex items-center justify-center mx-auto mb-1 font-black text-xs">1</div>
-                  <span className="text-[11px] font-bold text-slate-800">Spot & Snap</span>
-                </div>
-                <div className="bg-white p-4 rounded-2xl border border-emerald-100 text-center w-28 shadow-sm">
-                  <div className="w-8 h-8 rounded-full bg-orange-100 text-[#F97316] flex items-center justify-center mx-auto mb-1 font-black text-xs">2</div>
-                  <span className="text-[11px] font-bold text-slate-800">AI Triage</span>
-                </div>
-                <div className="bg-white p-4 rounded-2xl border border-emerald-100 text-center w-28 shadow-sm">
-                  <div className="w-8 h-8 rounded-full bg-emerald-100 text-[#10B981] flex items-center justify-center mx-auto mb-1 font-black text-xs">3</div>
-                  <span className="text-[11px] font-bold text-slate-800">Verified Fix</span>
-                </div>
-              </div>
-            </section>
-
-            {/* BEFORE & AFTER SLIDER */}
+            {/* 3. DYNAMIC BEFORE & AFTER INSPECTOR WITH REAL BIGQUERY PHOTOS */}
             <section id="diff-slider" className="bg-white p-6 sm:p-8 rounded-[32px] border border-slate-100 shadow-sm space-y-4">
-              <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2">
+              <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3">
                 <div>
                   <span className="inline-flex items-center gap-1 text-xs font-extrabold uppercase text-[#10B981] tracking-wider">
-                    <Sparkles className="w-3.5 h-3.5" /> AI Resolution Audit
+                    <Sparkles className="w-3.5 h-3.5" /> Gemini Resolution Agent Audit
                   </span>
                   <h3 className="text-xl sm:text-2xl font-black text-slate-900 mt-0.5">
                     Interactive Before & After Verification Slider
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Drag the slider horizontally to audit real physical repairs verified by the Gemini Resolution Agent.
+                    Live dual-photo audit loaded directly from BigQuery defect and contractor completion logs.
                   </p>
                 </div>
-                <span className="bg-emerald-50 text-[#047857] text-xs font-bold px-3.5 py-1.5 rounded-full border border-emerald-200 self-start sm:self-auto">
-                  Slide Position: {sliderPos}%
-                </span>
+
+                <div className="flex items-center gap-2 self-start sm:self-auto">
+                  <button
+                    onClick={() => setIsAutoSliding(!isAutoSliding)}
+                    className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-bold flex items-center gap-1 transition"
+                    title={isAutoSliding ? "Pause auto-slide" : "Resume auto-slide"}
+                  >
+                    {isAutoSliding ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 text-[#0B4D3C]" />}
+                    <span>{isAutoSliding ? "Auto-Scanning" : "Paused"}</span>
+                  </button>
+                  <span className="bg-emerald-50 text-[#047857] text-xs font-bold px-3 py-1.5 rounded-xl border border-emerald-200">
+                    {Math.round(sliderPos)}% Diff
+                  </span>
+                </div>
               </div>
 
-              <div className="relative w-full h-72 sm:h-96 rounded-2xl overflow-hidden select-none shadow-inner border border-slate-200">
-                <div
-                  className="absolute inset-0 bg-cover bg-center flex items-end p-5"
-                  style={{ backgroundImage: `url('https://images.unsplash.com/photo-1515162816999-a0c47dc192f7?auto=format&fit=crop&w=1200&q=80')` }}
-                >
-                  <span className="bg-emerald-950/80 backdrop-blur-md text-emerald-300 font-bold text-xs px-3.5 py-1.5 rounded-xl border border-emerald-400/30">
-                    AFTER: Clean Asphalt Patch (Gemini Status: PASS - 99.4%)
-                  </span>
-                </div>
+              {/* Slider Viewport */}
+              <div
+                className="relative w-full h-80 sm:h-96 rounded-2xl overflow-hidden select-none shadow-inner border border-slate-200 bg-slate-900"
+                onMouseEnter={() => setIsAutoSliding(false)}
+                onMouseLeave={() => setIsAutoSliding(true)}
+              >
+                {/* AFTER VIEW */}
+                {hasResolvedPhoto ? (
+                  <div
+                    className="absolute inset-0 bg-cover bg-center flex items-end p-5"
+                    style={{ backgroundImage: `url('${activeShowcase.resolved_image_url}')` }}
+                  >
+                    <span className="bg-emerald-950/90 backdrop-blur-md text-emerald-300 font-bold text-xs px-3.5 py-1.5 rounded-xl border border-emerald-400/30 shadow-lg flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      AFTER: Verified Repair Fix (Gemini PASS)
+                    </span>
+                  </div>
+                ) : (
+                  <div className="absolute inset-0 bg-gradient-to-r from-slate-900 via-emerald-950 to-slate-900 flex flex-col items-center justify-center p-6 text-center text-white">
+                    <Clock className="w-10 h-10 text-orange-400 animate-pulse mb-2" />
+                    <h4 className="font-black text-lg text-white">Awaiting Contractor Fix Verification</h4>
+                    <p className="text-xs text-slate-300 max-w-sm mt-1">
+                      Dispatched to municipal crew. Contractor completion photo will appear here once audited by the Resolution Agent.
+                    </p>
+                  </div>
+                )}
 
-                <div
-                  className="absolute inset-0 bg-cover bg-center flex items-end p-5 transition-none"
-                  style={{
-                    backgroundImage: `url('https://images.unsplash.com/photo-1515162816999-a0c47dc192f7?auto=format&fit=crop&w=1200&q=80')`,
-                    filter: 'grayscale(70%) contrast(150%) brightness(0.65)',
-                    clipPath: `polygon(0 0, ${sliderPos}% 0, ${sliderPos}% 100%, 0 100%)`
-                  }}
-                >
-                  <span className="bg-black/80 backdrop-blur-md text-orange-300 font-bold text-xs px-3.5 py-1.5 rounded-xl border border-orange-400/30">
-                    BEFORE: 18cm Road Hazard Subsidence
-                  </span>
-                </div>
+                {/* BEFORE VIEW */}
+                {hasIntakePhoto ? (
+                  <div
+                    className="absolute inset-0 bg-cover bg-center flex items-end p-5 transition-none"
+                    style={{
+                      backgroundImage: `url('${activeShowcase.intake_image_url}')`,
+                      clipPath: `polygon(0 0, ${sliderPos}% 0, ${sliderPos}% 100%, 0 100%)`
+                    }}
+                  >
+                    <span className="bg-black/90 backdrop-blur-md text-orange-300 font-bold text-xs px-3.5 py-1.5 rounded-xl border border-orange-400/30 shadow-lg flex items-center gap-1">
+                      <AlertTriangle className="w-3.5 h-3.5 text-orange-400" />
+                      BEFORE: Citizen Reported Defect Photo
+                    </span>
+                  </div>
+                ) : null}
 
+                {/* Divider Line */}
                 <div
                   className="absolute top-0 bottom-0 w-1 bg-white shadow-2xl z-20 pointer-events-none"
                   style={{ left: `${sliderPos}%` }}
@@ -387,163 +517,73 @@ export default function App() {
                   min="0"
                   max="100"
                   value={sliderPos}
-                  onChange={(e) => setSliderPos(Number(e.target.value))}
+                  onChange={(e) => {
+                    setIsAutoSliding(false);
+                    setSliderPos(Number(e.target.value));
+                  }}
                   aria-label="Before and after comparison slider"
                   className="absolute inset-0 w-full h-full opacity-0 cursor-ew-resize z-30"
                 />
               </div>
 
-              <div className="bg-[#F4F8F6] p-4 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between text-xs text-slate-700 gap-2">
-                <span className="font-semibold">Case #inc_8a084853 • Ward 14 Central Core</span>
-                <span className="font-bold text-[#0B4D3C] flex items-center">
-                  <ShieldCheck className="w-4 h-4 mr-1 text-[#10B981]" /> Dual-Photo Structural Verification Approved
+              {/* Dynamic Footer with Real Details */}
+              <div className="bg-[#F4F8F6] p-4 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between text-xs text-slate-700 gap-2 border border-emerald-900/10">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono font-bold text-slate-900">Case #{activeShowcase.incident_id || activeShowcase.id}</span>
+                  <span className="text-slate-300">•</span>
+                  <span className="font-semibold text-slate-700">{activeShowcase.ward}</span>
+                  <span className="text-slate-300">•</span>
+                  <span className="text-slate-500 truncate max-w-sm">{activeShowcase.location}</span>
+                </div>
+                <span className="font-bold text-[#0B4D3C] flex items-center shrink-0">
+                  <ShieldCheck className="w-4 h-4 mr-1 text-[#10B981]" /> Dual-Photo Structural Verification {isResolved ? "Approved" : "In Progress"}
                 </span>
               </div>
             </section>
 
-            {/* LIVE ACTIVE INCIDENTS FEED */}
-            <section className="space-y-4">
-              <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3">
-                <div>
-                  <h3 className="text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-                    Active Incident Feed
-                    <button
-                      onClick={fetchIncidentsFromBQ}
-                      title="Refresh from BigQuery"
-                      className="p-1.5 rounded-lg hover:bg-slate-200 text-slate-400 hover:text-slate-700 transition"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-[#0B4D3C]' : ''}`} />
-                    </button>
-                  </h3>
-                  <p className="text-xs text-slate-500">Live clusters streamed from BigQuery warehouse</p>
-                </div>
-
-                <div className="relative w-full sm:w-64">
-                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-3" />
-                  <input
-                    type="text"
-                    placeholder="Search incidents..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full bg-white border border-slate-200 text-xs font-semibold rounded-xl pl-8 pr-3 py-2 focus:ring-2 focus:ring-[#0B4D3C]"
-                  />
-                </div>
-              </div>
-
-              {filteredIncidents.length === 0 ? (
-                <div className="text-center py-12 bg-white border border-dashed border-slate-200 rounded-[24px] text-slate-400 text-sm">
-                  No active incidents found in BigQuery warehouse.
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  {filteredIncidents.map((inc) => (
-                    <div key={inc.id} className="bg-white p-5 rounded-[24px] border border-slate-100 shadow-sm hover:shadow-md transition space-y-3 flex flex-col justify-between">
-                      <div>
-                        <div className="flex justify-between items-start">
-                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-extrabold ${
-                            inc.severity && (inc.severity.includes('High') || inc.severity.includes('Critical'))
-                              ? 'bg-red-50 text-red-600 border border-red-200'
-                              : 'bg-orange-50 text-[#F97316] border border-orange-200'
-                          }`}>
-                            <Flame className="w-3 h-3 mr-1" /> {inc.severity || "P2 - Moderate"}
-                          </span>
-
-                          <button
-                            onClick={() => toggleUpvote(inc.id)}
-                            className={`flex items-center space-x-1 text-xs font-bold px-2.5 py-1 rounded-xl transition ${
-                              inc.userUpvoted
-                                ? 'bg-emerald-50 text-[#047857] border border-emerald-200'
-                                : 'bg-slate-50 text-slate-600 hover:bg-slate-100'
-                            }`}
-                          >
-                            <ThumbsUp className={`w-3.5 h-3.5 ${inc.userUpvoted ? 'fill-current' : ''}`} />
-                            <span>{inc.upvotes || 1}</span>
-                          </button>
-                        </div>
-
-                        <h4 className="font-bold text-slate-900 text-sm mt-3">{inc.title}</h4>
-                        <p className="text-xs text-slate-500 mt-1 flex items-center">
-                          <MapPin className="w-3 h-3 mr-1 text-slate-400 shrink-0" /> {inc.location}
-                        </p>
-                      </div>
-
-                      <div className="pt-3 border-t border-slate-100 flex justify-between items-center text-xs">
-                        <span className="text-slate-400 text-[11px] font-mono">{inc.reportsMerged || 1} merged</span>
-                        <span className={`font-bold ${inc.status === 'RESOLVED' ? 'text-[#10B981]' : 'text-[#F97316]'}`}>
-                          {inc.slaCountdown || "In Progress"}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
+            {/* LIVE INCIDENT FEED */}
+            <IncidentFeed
+              incidents={incidents}
+              isLoading={isLoading}
+              onRefresh={fetchIncidentsFromBQ}
+              onToggleUpvote={toggleUpvote}
+              onResolveSuccess={(id) => handleStatusChange(id, 'RESOLVED')}
+            />
           </>
+        ) : activeTab === 'goals' ? (
+          /* ========================================================= */
+          /* MISSION & GOALS SHOWCASE                                  */
+          /* ========================================================= */
+          <MissionGoals />
+        ) : activeTab === 'access' ? (
+          /* ========================================================= */
+          /* FULL-PAGE ACCESS PORTAL & WHAT WE DO                      */
+          /* ========================================================= */
+          <AccessPortalPage
+            onLoginSuccess={(user) => {
+              setCurrentUser(user);
+              showToast({
+                type: 'create',
+                title: user.is_verified_admin ? 'Admin Verified' : 'Citizen Mode Active',
+                message: `Welcome, ${user.name}! ${user.is_verified_admin ? 'Full Municipal Dispatch privileges granted.' : ''}`,
+                id: user.admin_id || 'USR'
+              });
+              if (user.is_verified_admin) {
+                setActiveTab('portal');
+              } else {
+                setActiveTab('home');
+              }
+            }}
+            onNavigateHome={() => setActiveTab('home')}
+          />
         ) : (
-          /* MUNICIPAL ADMIN PORTAL VIEW */
-          <section className="space-y-6">
-            <div className="bg-white p-6 rounded-[28px] border border-slate-100 shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-              <div>
-                <h2 className="text-2xl font-black text-slate-900">Municipal Operations Portal</h2>
-                <p className="text-xs text-slate-500 mt-0.5">Live BigQuery SLA Routing & Work Orders</p>
-              </div>
-
-              <div className="flex items-center space-x-2">
-                <span className="text-xs font-bold text-slate-500">Filter Ward:</span>
-                <select
-                  value={selectedWard}
-                  onChange={(e) => setSelectedWard(e.target.value)}
-                  className="bg-[#F4F8F6] border border-slate-200 text-xs font-bold text-slate-800 rounded-xl px-3.5 py-2 focus:outline-none focus:ring-2 focus:ring-[#0B4D3C]"
-                >
-                  <option value="ALL">All Wards</option>
-                  <option value="Ward 14 - Central Core">Ward 14 - Central Core</option>
-                  <option value="Ward 12 - North Industrial">Ward 12 - North Industrial</option>
-                  <option value="Ward 08 - South Suburbs">Ward 08 - South Suburbs</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="bg-white rounded-[28px] border border-slate-100 shadow-sm overflow-hidden">
-              <div className="bg-[#0B4D3C] text-white px-6 py-3.5 text-xs font-bold grid grid-cols-6 gap-2">
-                <span>Incident ID</span>
-                <span>Category</span>
-                <span>Priority</span>
-                <span>Department</span>
-                <span>SLA Countdown</span>
-                <span className="text-right">Action</span>
-              </div>
-
-              <div className="divide-y divide-slate-100">
-                {incidents
-                  .filter(inc => selectedWard === 'ALL' || inc.ward.includes(selectedWard) || selectedWard.includes(inc.ward))
-                  .map((inc) => (
-                    <div key={inc.id} className="px-6 py-4 grid grid-cols-6 gap-2 items-center text-xs hover:bg-[#F4F8F6]/60 transition">
-                      <span className="font-mono font-bold text-slate-900">{inc.id}</span>
-                      <span className="text-slate-600">{inc.category}</span>
-                      <span>
-                        <span className={`font-extrabold px-2 py-0.5 rounded-md border ${
-                          inc.severity && (inc.severity.includes('High') || inc.severity.includes('Critical'))
-                            ? 'bg-red-50 text-red-600 border-red-200'
-                            : 'bg-orange-50 text-[#F97316] border-orange-200'
-                        }`}>
-                          {inc.severity || "P2 - Moderate"}
-                        </span>
-                      </span>
-                      <span className="text-slate-600">{inc.department}</span>
-                      <span className="font-bold text-[#F97316]">{inc.slaCountdown}</span>
-                      <div className="text-right">
-                        <button
-                          onClick={() => alert(`Crew dispatched for ${inc.id} in ${inc.ward}`)}
-                          className="bg-[#10B981] hover:bg-emerald-600 text-slate-950 font-bold px-3 py-1.5 rounded-xl transition"
-                        >
-                          Dispatch Crew
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-              </div>
-            </div>
-          </section>
+          /* ========================================================= */
+          /* MUNICIPAL ADMIN OPERATIONS PORTAL                         */
+          /* ========================================================= */
+          <AdminPortal
+            incidents={incidents}
+            onStatusChange={handleStatusChange}
+          />
         )}
       </main>
 

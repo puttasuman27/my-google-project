@@ -1,8 +1,12 @@
 import os
 import uuid
 import base64
+import urllib.request
+import urllib.parse
+import json
+import logging
 from typing import Optional
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from google.cloud import bigquery
@@ -11,10 +15,13 @@ from agents.vision_agent import VisionAgent
 from agents.incident_agent import IncidentAgent
 from agents.operations_agent import OperationsAgent
 from agents.resolution_agent import ResolutionAgent
+from services.firestore_service import FirestoreService
+from services.pubsub_service import PubSubService
 
+logger = logging.getLogger(__name__)
 load_dotenv()
 
-app = FastAPI(title="CivicPulse Core API", version="2.0.0")
+app = FastAPI(title="CivicPulse Core API", version="3.6.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,6 +35,8 @@ vision_agent = VisionAgent()
 incident_agent = IncidentAgent()
 operations_agent = OperationsAgent()
 resolution_agent = ResolutionAgent()
+firestore_service = FirestoreService()
+pubsub_service = PubSubService()
 
 GCP_PROJECT = os.getenv("GCP_PROJECT_ID", "civicpulse-app-505811")
 BQ_DATASET = os.getenv("BIGQUERY_DATASET", "civicpulse_analytics")
@@ -35,19 +44,251 @@ BQ_DATASET = os.getenv("BIGQUERY_DATASET", "civicpulse_analytics")
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "service": "civicpulse-agentic-core"}
+    return {"status": "healthy", "service": "civicpulse-agentic-core", "version": "3.6.0"}
 
 
+# ============================================================================
+# 🗺️ GEOCODING & REVERSE GEOCODING
+# ============================================================================
+@app.get("/api/v1/geocode")
+def geocode_search(query: str = Query(..., min_length=2)):
+    try:
+        encoded_q = urllib.parse.quote(query)
+        url = f"https://nominatim.openstreetmap.org/search?q={encoded_q}&format=json&limit=5&addressdetails=1"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "CivicPulse-Municipal-AI/3.6 (contact: puttasuman27@gmail.com)"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode())
+            results = []
+            for item in data:
+                lat = float(item.get("lat"))
+                lng = float(item.get("lon"))
+                ward_num = int((lat % 1) * 100)
+                results.append({
+                    "display_name": item.get("display_name"),
+                    "latitude": lat,
+                    "longitude": lng,
+                    "ward": f"Ward-{ward_num:02d}",
+                    "address": item.get("address", {})
+                })
+            return {"query": query, "results": results}
+    except Exception as e:
+        logger.warning(f"Geocoding lookup fallback: {e}")
+        return {
+            "query": query,
+            "results": [{
+                "display_name": f"{query}, Municipal Zone Core",
+                "latitude": 17.49367,
+                "longitude": 78.42035,
+                "ward": "Ward-14"
+            }]
+        }
+
+
+@app.get("/api/v1/reverse-geocode")
+def reverse_geocode(lat: float = Query(...), lng: float = Query(...)):
+    try:
+        url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lng}&format=json"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "CivicPulse-Municipal-AI/3.6 (contact: puttasuman27@gmail.com)"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode())
+            addr = data.get("address", {})
+            street = addr.get("road") or addr.get("suburb") or addr.get("neighbourhood") or "Arterial Road"
+            city = addr.get("city") or addr.get("town") or "Metro Core"
+            ward_num = int((lat % 1) * 100)
+            formatted = f"{street}, Ward-{ward_num:02d}, {city}"
+            return {
+                "latitude": lat,
+                "longitude": lng,
+                "formatted_address": formatted,
+                "ward": f"Ward-{ward_num:02d}"
+            }
+    except Exception:
+        ward_num = int((lat % 1) * 100)
+        return {
+            "latitude": lat,
+            "longitude": lng,
+            "formatted_address": f"Ward-{ward_num:02d}, Main Arterial Road",
+            "ward": f"Ward-{ward_num:02d}"
+        }
+
+
+# ============================================================================
+# 🔐 AUTHENTICATION ENDPOINT
+# ============================================================================
+@app.post("/api/v1/auth/login")
+async def login_user(payload: dict = Body(...)):
+    email = payload.get("email", "").strip().lower()
+    password = payload.get("password", "").strip()
+
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password are required.")
+
+    # Default Officer profile fallback
+    if email == "puttasuman27@gmail.com" and password == "12345678":
+        user_profile = firestore_service.set_user_role(
+            email="puttasuman27@gmail.com",
+            name="Sumanth Puttaswamy",
+            role="MUNICIPAL_COMMISSIONER",
+            assigned_ward="ALL",
+            designation="Chief Municipal Operations Officer"
+        )
+        return {"success": True, "user": user_profile}
+
+    try:
+        client = bigquery.Client(project=GCP_PROJECT)
+        query = f"""
+            SELECT admin_id, name, email, role, assigned_ward, designation
+            FROM `{GCP_PROJECT}.{BQ_DATASET}.admins`
+            WHERE LOWER(email) = @email AND password_hash = @password
+            LIMIT 1
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("email", "STRING", email),
+                bigquery.ScalarQueryParameter("password", "STRING", password),
+            ]
+        )
+        rows = list(client.query(query, job_config=job_config).result())
+
+        if rows:
+            admin_data = dict(rows[0])
+            synced_profile = firestore_service.set_user_role(
+                email=admin_data["email"],
+                name=admin_data["name"],
+                role=admin_data["role"],
+                assigned_ward=admin_data["assigned_ward"],
+                designation=admin_data.get("designation", "Municipal Officer")
+            )
+            return {"success": True, "user": synced_profile}
+    except Exception as e:
+        logger.error(f"BigQuery Auth check error: {e}")
+
+    firestore_user = firestore_service.get_user_role(email)
+    if firestore_user and firestore_user.get("is_verified_admin"):
+        return {"success": True, "user": firestore_user}
+
+    raise HTTPException(status_code=401, detail="Invalid government email or password credentials.")
+
+
+# ============================================================================
+# 🚨 INCIDENTS LIST (FAIL-SAFE - NEVER THROWS UNHANDLED 500)
+# ============================================================================
+@app.get("/api/v1/incidents")
+def list_canonical_incidents(
+    status: Optional[str] = Query(None),
+    ward: Optional[str] = Query(None),
+    limit: int = Query(60, le=200)
+):
+    try:
+        client = bigquery.Client(project=GCP_PROJECT)
+        
+        conditions = [
+            "category IS NOT NULL",
+            "category != ''",
+            "latitude IS NOT NULL",
+            "longitude IS NOT NULL"
+        ]
+        params = [bigquery.ScalarQueryParameter("limit", "INT64", limit)]
+
+        if status and status != "ALL":
+            conditions.append("UPPER(TRIM(status)) = UPPER(TRIM(@status))")
+            params.append(bigquery.ScalarQueryParameter("status", "STRING", status))
+
+        if ward and ward != "ALL":
+            conditions.append("LOWER(assigned_ward) LIKE LOWER(@ward)")
+            params.append(bigquery.ScalarQueryParameter("ward", "STRING", f"%{ward}%"))
+        
+        where_clause = "WHERE " + " AND ".join(conditions)
+
+        # Resilient query with COALESCE and safe column selections
+        query = f"""
+            SELECT 
+                incident_id, 
+                category, 
+                latitude, 
+                longitude,
+                COALESCE(severity_score, 0.5) AS severity_score, 
+                COALESCE(priority_score, 0.5) AS priority_score, 
+                COALESCE(duplicate_count, 1) AS duplicate_count,
+                COALESCE(assigned_ward, 'Ward-14') AS assigned_ward, 
+                COALESCE(status, 'OPEN') AS status, 
+                sla_deadline, 
+                created_at, 
+                updated_at,
+                intake_image_url,
+                resolved_image_url
+            FROM `{GCP_PROJECT}.{BQ_DATASET}.incidents`
+            {where_clause}
+            ORDER BY priority_score DESC, updated_at DESC
+            LIMIT @limit
+        """
+
+        try:
+            rows = client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        except Exception as query_err:
+            # Fallback if image columns don't exist yet
+            logger.warning(f"Full column query failed ({query_err}), falling back to base columns...")
+            fallback_query = f"""
+                SELECT 
+                    incident_id, 
+                    category, 
+                    latitude, 
+                    longitude,
+                    COALESCE(severity_score, 0.5) AS severity_score, 
+                    COALESCE(priority_score, 0.5) AS priority_score, 
+                    COALESCE(duplicate_count, 1) AS duplicate_count,
+                    COALESCE(assigned_ward, 'Ward-14') AS assigned_ward, 
+                    COALESCE(status, 'OPEN') AS status, 
+                    sla_deadline, 
+                    created_at, 
+                    updated_at
+                FROM `{GCP_PROJECT}.{BQ_DATASET}.incidents`
+                {where_clause}
+                ORDER BY priority_score DESC, updated_at DESC
+                LIMIT @limit
+            """
+            rows = client.query(fallback_query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+
+        incidents = []
+        for r in rows:
+            rec = dict(r)
+            for k in ["created_at", "updated_at", "sla_deadline"]:
+                if rec.get(k):
+                    rec[k] = str(rec[k])
+            # Ensure keys exist
+            if "intake_image_url" not in rec:
+                rec["intake_image_url"] = ""
+            if "resolved_image_url" not in rec:
+                rec["resolved_image_url"] = ""
+            incidents.append(rec)
+
+        return {"total": len(incidents), "incidents": incidents}
+
+    except Exception as e:
+        logger.error(f"Error fetching incidents from BigQuery: {e}")
+        # Return empty list on failure so UI does not crash
+        return {"total": 0, "incidents": []}
+
+
+# ============================================================================
+# 🚨 REPORT DEFECT
+# ============================================================================
 @app.post("/api/v1/reports")
 async def report_issue(request: Request):
     try:
         content_type = request.headers.get("content-type", "")
         image_bytes = b""
         mime_type = "image/jpeg"
+        image_uri = ""
         latitude = 17.49367
         longitude = 78.42035
         citizen_notes = ""
-        category_input = "POTHOLE"
         road_class = "ARTERIAL"
 
         if "application/json" in content_type:
@@ -55,7 +296,6 @@ async def report_issue(request: Request):
             latitude = float(body.get("latitude") or 17.49367)
             longitude = float(body.get("longitude") or 78.42035)
             citizen_notes = body.get("description_text") or body.get("description") or ""
-            category_input = body.get("category") or "POTHOLE"
             
             image_uri = body.get("image_uri", "")
             if image_uri and image_uri.startswith("data:image"):
@@ -69,31 +309,40 @@ async def report_issue(request: Request):
             if uploaded_file and hasattr(uploaded_file, "read"):
                 image_bytes = await uploaded_file.read()
                 mime_type = getattr(uploaded_file, "content_type", "image/jpeg") or "image/jpeg"
+                image_uri = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('utf-8')}"
             latitude = float(form.get("latitude") or 17.49367)
             longitude = float(form.get("longitude") or 78.42035)
             citizen_notes = form.get("citizen_notes") or form.get("description_text") or ""
-            category_input = form.get("category") or "POTHOLE"
 
-        # 1. Vision Analysis & Authenticity Validation
+        # 1. Vision Analysis & Validation
         vision_result = vision_agent.analyze_image(image_bytes, mime_type)
 
-        # REJECT INVALID / NON-CIVIC PHOTOS (documents, selfies, screenshots, etc.)
         if not vision_result.is_valid_civic_issue:
             raise HTTPException(
                 status_code=400,
                 detail=vision_result.rejection_reason or "Uploaded photo is not a valid municipal infrastructure hazard."
             )
 
-        # 2. BigQuery GIS Spatial Deduplication (50m proximity)
+        # 2. Pub/Sub Ingestion Event
+        pubsub_msg_id = pubsub_service.publish_incident_report({
+            "category": vision_result.category,
+            "latitude": latitude,
+            "longitude": longitude,
+            "severity_score": vision_result.severity_score,
+            "citizen_notes": citizen_notes
+        })
+
+        # 3. BigQuery Deduplication
         cluster = incident_agent.process_and_cluster(
             vision_result=vision_result,
             lat=latitude,
             lng=longitude,
             citizen_notes=citizen_notes,
+            image_url=image_uri,
             road_class=road_class
         )
 
-        # 3. Operations SLA Assignment
+        # 4. Operations Routing
         ops = operations_agent.route_and_assign_sla(
             incident_id=cluster.canonical_incident_id,
             category=vision_result.category,
@@ -110,6 +359,8 @@ async def report_issue(request: Request):
             "is_duplicate": cluster.is_duplicate,
             "duplicate_count": cluster.duplicate_count,
             "dedup_explanation": cluster.explanation,
+            "intake_image_url": image_uri,
+            "pubsub_message_id": pubsub_msg_id,
             "analysis": {
                 "category": vision_result.category,
                 "severity_level": vision_result.severity_level,
@@ -120,7 +371,7 @@ async def report_issue(request: Request):
             },
             "routing": {
                 "assigned_department": ops.get("assigned_department", "Roads & Highway Infrastructure Dept"),
-                "assigned_ward": ops.get("assigned_ward", "Ward-14"),
+                "assigned_ward": ops.get("assigned_ward", "Ward 14 - Central Core"),
                 "priority_level": prio_label,
                 "priority_score": cluster.updated_priority_score,
                 "sla_hours": ops.get("sla_hours", 24),
@@ -131,60 +382,95 @@ async def report_issue(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Report submission error: {e}")
+        logger.error(f"Report submission error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/v1/incidents")
-def list_canonical_incidents(status: Optional[str] = Query(None), limit: int = Query(50, le=200)):
+@app.patch("/api/v1/incidents/{incident_id}/status")
+async def update_incident_status(
+    incident_id: str,
+    payload: dict = Body(...)
+):
+    new_status = payload.get("status", "IN_PROGRESS").upper().strip()
+    target_id = incident_id.strip()
     try:
         client = bigquery.Client(project=GCP_PROJECT)
+        table_ref = f"`{GCP_PROJECT}.{BQ_DATASET}.incidents`"
         
-        conditions = [
-            "category IS NOT NULL",
-            "category != ''",
-            "latitude IS NOT NULL",
-            "longitude IS NOT NULL"
-        ]
-        if status:
-            conditions.append("status = @status")
-        
-        where_clause = "WHERE " + " AND ".join(conditions)
-
         query = f"""
-            SELECT 
-                incident_id, 
-                category, 
-                latitude, 
-                longitude,
-                COALESCE(severity_score, 0.5) AS severity_score, 
-                COALESCE(priority_score, 0.5) AS priority_score, 
-                COALESCE(duplicate_count, 1) AS duplicate_count,
-                COALESCE(assigned_ward, 'Ward-14') AS assigned_ward, 
-                COALESCE(status, 'OPEN') AS status, 
-                sla_deadline, 
-                created_at, 
-                updated_at
-            FROM `{GCP_PROJECT}.{BQ_DATASET}.incidents`
-            {where_clause}
-            ORDER BY priority_score DESC, updated_at DESC
-            LIMIT @limit
+            UPDATE {table_ref}
+            SET status = @new_status,
+                updated_at = CURRENT_TIMESTAMP()
+            WHERE UPPER(TRIM(incident_id)) = UPPER(TRIM(@target_id))
         """
-        params = [bigquery.ScalarQueryParameter("limit", "INT64", limit)]
-        if status:
-            params.append(bigquery.ScalarQueryParameter("status", "STRING", status))
-
-        rows = client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-        
-        incidents = []
-        for r in rows:
-            rec = dict(r)
-            for k in ["created_at", "updated_at", "sla_deadline"]:
-                if rec.get(k):
-                    rec[k] = str(rec[k])
-            incidents.append(rec)
-
-        return {"total": len(incidents), "incidents": incidents}
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("new_status", "STRING", new_status),
+                bigquery.ScalarQueryParameter("target_id", "STRING", target_id),
+            ]
+        )
+        client.query(query, job_config=job_config).result()
+        return {"success": True, "incident_id": target_id, "status": new_status}
     except Exception as e:
-        print(f"Fetch incidents error: {e}")
+        logger.error(f"Status update error for {target_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/incidents/{incident_id}/resolve")
+async def resolve_incident_with_verification(
+    incident_id: str,
+    payload: dict = Body(...)
+):
+    target_id = incident_id.strip()
+    try:
+        image_uri = payload.get("image_uri", "")
+        category = payload.get("category", "POTHOLE")
+
+        image_bytes = b""
+        mime_type = "image/jpeg"
+        if image_uri and image_uri.startswith("data:image"):
+            header, base64_data = image_uri.split(",", 1)
+            mime_type = header.split(";")[0].split(":")[1] if ":" in header else "image/jpeg"
+            image_bytes = base64.b64decode(base64_data)
+
+        # 1. Gemini Resolution Verification
+        audit = resolution_agent.verify_resolution(
+            after_image_bytes=image_bytes,
+            category=category,
+            mime_type=mime_type
+        )
+
+        # 2. Update BigQuery
+        if audit.is_resolved:
+            client = bigquery.Client(project=GCP_PROJECT)
+            table_ref = f"`{GCP_PROJECT}.{BQ_DATASET}.incidents`"
+            query = f"""
+                UPDATE {table_ref}
+                SET status = 'RESOLVED',
+                    resolved_image_url = @resolved_image,
+                    updated_at = CURRENT_TIMESTAMP()
+                WHERE UPPER(TRIM(incident_id)) = UPPER(TRIM(@target_id))
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("resolved_image", "STRING", image_uri),
+                    bigquery.ScalarQueryParameter("target_id", "STRING", target_id),
+                ]
+            )
+            client.query(query, job_config=job_config).result()
+
+        return {
+            "success": audit.is_resolved,
+            "incident_id": target_id,
+            "status": "RESOLVED" if audit.is_resolved else "IN_PROGRESS",
+            "audit": {
+                "is_resolved": audit.is_resolved,
+                "confidence_score": audit.confidence_score,
+                "explanation": audit.explanation,
+                "action_taken": audit.action_taken,
+                "quality_verdict": audit.quality_verdict
+            }
+        }
+    except Exception as e:
+        logger.error(f"Resolution verification error for {target_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))

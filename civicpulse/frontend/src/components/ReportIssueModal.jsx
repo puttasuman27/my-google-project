@@ -35,7 +35,7 @@ function MapRecenter({ lat, lng }) {
   const map = useMap();
   useEffect(() => {
     if (lat && lng) {
-      map.setView([lat, lng], map.getZoom(), { animate: true });
+      map.setView([lat, lng], 16, { animate: true });
     }
   }, [lat, lng, map]);
   return null;
@@ -51,12 +51,14 @@ function LocationPickerEvents({ onLocationSelected }) {
 }
 
 const DEFAULT_COORDS = { lat: 17.49367, lng: 78.42035 };
-const DEFAULT_ADDRESS = 'Ward 14, Main Arterial Road';
+const DEFAULT_ADDRESS = 'Ward 14, Main Arterial Road, Metro Core';
 
 export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
   const [coords, setCoords] = useState(DEFAULT_COORDS);
   const [addressQuery, setAddressQuery] = useState(DEFAULT_ADDRESS);
   const [isLocating, setIsLocating] = useState(false);
+  const [isSearchingAddress, setIsSearchingAddress] = useState(false);
+  const [searchResults, setSearchResults] = useState([]);
   const [locationMsg, setLocationMsg] = useState('');
 
   const [category, setCategory] = useState('POTHOLE');
@@ -83,6 +85,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
     setAgentResponse(null);
     setErrorMessage('');
     setLocationMsg('');
+    setSearchResults([]);
     stopCamera();
   };
 
@@ -99,6 +102,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
     onClose();
   };
 
+  // 🛰️ Live Device GPS Pinpoint
   const handleGetGPS = () => {
     if (!navigator.geolocation) {
       alert("Geolocation is not supported by your browser.");
@@ -107,12 +111,22 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
     setIsLocating(true);
     setErrorMessage('');
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
+      async (pos) => {
         const { latitude, longitude } = pos.coords;
         setCoords({ lat: latitude, lng: longitude });
-        setAddressQuery(`GPS Locked: ${latitude.toFixed(5)}, ${longitude.toFixed(5)}`);
-        setLocationMsg('Device GPS Pinpoint Locked');
         setIsLocating(false);
+        setLocationMsg('GPS Locked');
+
+        // Reverse-geocode to real address
+        try {
+          const res = await fetch(`/api/v1/reverse-geocode?lat=${latitude}&lng=${longitude}`);
+          const data = await res.json();
+          if (data.formatted_address) {
+            setAddressQuery(data.formatted_address);
+          }
+        } catch {
+          setAddressQuery(`GPS: ${latitude.toFixed(5)}, ${longitude.toFixed(5)}`);
+        }
         setTimeout(() => setLocationMsg(''), 3000);
       },
       () => {
@@ -123,10 +137,47 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
     );
   };
 
-  const handleMapPin = (lat, lng) => {
+  // 🗺️ Click on Map -> Reverse Geocode to street name
+  const handleMapPin = async (lat, lng) => {
     setCoords({ lat, lng });
-    setAddressQuery(`Pin Marked: ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
-    setLocationMsg('Coordinates updated on map');
+    setLocationMsg('Pin Updated');
+    try {
+      const res = await fetch(`/api/v1/reverse-geocode?lat=${lat}&lng=${lng}`);
+      const data = await res.json();
+      if (data.formatted_address) {
+        setAddressQuery(data.formatted_address);
+      }
+    } catch {
+      setAddressQuery(`Pin Marked: ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+    }
+    setTimeout(() => setLocationMsg(''), 3000);
+  };
+
+  // 🔍 Geocoding Search (Find places, landmarks, streets)
+  const handleAddressSearch = async (queryText) => {
+    setAddressQuery(queryText);
+    if (!queryText || queryText.length < 3) {
+      setSearchResults([]);
+      return;
+    }
+
+    setIsSearchingAddress(true);
+    try {
+      const res = await fetch(`/api/v1/geocode?query=${encodeURIComponent(queryText)}`);
+      const data = await res.json();
+      setSearchResults(data.results || []);
+    } catch (err) {
+      console.warn("Geocoding lookup error:", err);
+    } finally {
+      setIsSearchingAddress(false);
+    }
+  };
+
+  const selectSearchResult = (item) => {
+    setCoords({ lat: item.latitude, lng: item.longitude });
+    setAddressQuery(item.display_name);
+    setSearchResults([]);
+    setLocationMsg(`Selected: ${item.ward}`);
     setTimeout(() => setLocationMsg(''), 3000);
   };
 
@@ -200,7 +251,6 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
       }
 
       const data = await res.json();
-      // Set the agent response state to display the popup screen
       setAgentResponse(data);
 
       const incidentForFeed = {
@@ -222,7 +272,6 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
         reportedAt: "Just now"
       };
 
-      // Notify parent dashboard feed (without closing modal prematurely)
       if (onReportSuccess) onReportSuccess(incidentForFeed, data);
     } catch (err) {
       console.error("Agent Pipeline Error:", err);
@@ -239,7 +288,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
       <div className="bg-white rounded-[32px] p-6 sm:p-8 max-w-2xl w-full max-h-[92vh] overflow-y-auto space-y-5 shadow-2xl border border-slate-100">
         
         {/* ========================================================= */}
-        {/* SUCCESS POPUP SCREEN (When report is processed)           */}
+        {/* SUCCESS POPUP SCREEN                                      */}
         {/* ========================================================= */}
         {agentResponse ? (
           <div className="space-y-6 py-2 animate-in fade-in zoom-in duration-300">
@@ -332,7 +381,6 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
               </div>
             </div>
 
-            {/* Return Button */}
             <button
               onClick={handleClose}
               className="w-full bg-[#0B4D3C] hover:bg-[#047857] text-white font-extrabold py-4 rounded-2xl shadow-lg flex items-center justify-center space-x-2 transition active:scale-95"
@@ -343,7 +391,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
           </div>
         ) : (
           /* ========================================================= */
-          /* DEFAULT FORM VIEW                                        */
+          /* FORM VIEW                                                 */
           /* ========================================================= */
           <>
             <div className="flex justify-between items-start pb-2 border-b border-slate-100">
@@ -404,6 +452,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
             )}
 
             <form onSubmit={handleFormSubmit} className="space-y-5">
+              {/* SECTION 1: PHOTO EVIDENCE */}
               <div className="space-y-2">
                 <div className="flex justify-between items-center">
                   <label className="text-xs font-black uppercase text-slate-700 tracking-wider">
@@ -460,10 +509,11 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
                 </div>
               </div>
 
+              {/* SECTION 2: MAP LOCATION WITH GEOCODING SEARCH */}
               <div className="space-y-2.5">
                 <div className="flex justify-between items-center">
                   <label className="text-xs font-black uppercase text-slate-700 tracking-wider">
-                    2. Mark Geolocation
+                    2. Search Place & Mark Pinpoint
                   </label>
                   {locationMsg && (
                     <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
@@ -472,28 +522,57 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
                   )}
                 </div>
 
-                <div className="flex gap-2">
-                  <div className="relative flex-1">
-                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-                    <input
-                      type="text"
-                      value={addressQuery}
-                      onChange={(e) => setAddressQuery(e.target.value)}
-                      placeholder="Enter street, landmark, or ward..."
-                      className="w-full bg-[#F4F8F6] border border-slate-200 rounded-xl pl-9 pr-3.5 py-2.5 text-xs font-bold text-slate-800 focus:ring-2 focus:ring-[#0B4D3C]"
-                    />
+                {/* Geocoding Search Input with Auto-Complete Dropdown */}
+                <div className="relative">
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                      <input
+                        type="text"
+                        value={addressQuery}
+                        onChange={(e) => handleAddressSearch(e.target.value)}
+                        placeholder="Search landmark, street name, or metro junction..."
+                        className="w-full bg-[#F4F8F6] border border-slate-200 rounded-xl pl-9 pr-3.5 py-2.5 text-xs font-bold text-slate-800 focus:ring-2 focus:ring-[#0B4D3C]"
+                      />
+                      {isSearchingAddress && (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-400 absolute right-3 top-3.5" />
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleGetGPS}
+                      disabled={isLocating}
+                      className="bg-[#0B4D3C] hover:bg-[#047857] text-white px-3.5 py-2.5 rounded-xl text-xs font-bold flex items-center space-x-1.5 transition active:scale-95 shrink-0"
+                    >
+                      {isLocating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Navigation className="w-4 h-4 text-[#F97316]" />}
+                      <span>{isLocating ? "Locating..." : "Live GPS"}</span>
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={handleGetGPS}
-                    disabled={isLocating}
-                    className="bg-[#0B4D3C] hover:bg-[#047857] text-white px-3.5 py-2.5 rounded-xl text-xs font-bold flex items-center space-x-1.5 transition active:scale-95 shrink-0"
-                  >
-                    {isLocating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Navigation className="w-4 h-4 text-[#F97316]" />}
-                    <span>{isLocating ? "Locating..." : "Live GPS"}</span>
-                  </button>
+
+                  {/* Search Autocomplete List */}
+                  {searchResults.length > 0 && (
+                    <div className="absolute top-12 left-0 right-0 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 overflow-hidden divide-y divide-slate-100 max-h-48 overflow-y-auto">
+                      {searchResults.map((item, idx) => (
+                        <div
+                          key={idx}
+                          onClick={() => selectSearchResult(item)}
+                          className="p-3 text-xs hover:bg-[#F4F8F6] cursor-pointer flex items-center justify-between gap-2"
+                        >
+                          <div className="flex items-center gap-2 truncate">
+                            <MapPin className="w-3.5 h-3.5 text-[#F97316] shrink-0" />
+                            <span className="truncate text-slate-800 font-medium">{item.display_name}</span>
+                          </div>
+                          <span className="text-[10px] font-bold bg-emerald-50 text-[#0B4D3C] px-2 py-0.5 rounded-md shrink-0">
+                            {item.ward}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
+                {/* Leaflet Map with Recenter */}
                 <div className="rounded-2xl overflow-hidden border border-slate-200 shadow-inner h-44 relative z-0">
                   <MapContainer center={[coords.lat, coords.lng]} zoom={15} scrollWheelZoom={false} className="w-full h-full">
                     <TileLayer attribution='&copy; OpenStreetMap' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
@@ -502,12 +581,13 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
                     <LocationPickerEvents onLocationSelected={handleMapPin} />
                   </MapContainer>
                   <div className="absolute bottom-2 left-2 right-2 bg-black/75 backdrop-blur-md text-white text-[10px] font-bold px-3 py-1 rounded-xl flex justify-between pointer-events-none z-[400]">
-                    <span>Tap map to reposition</span>
+                    <span>Click anywhere on map to reposition pin</span>
                     <span className="font-mono text-emerald-300">{coords.lat.toFixed(4)}, {coords.lng.toFixed(4)}</span>
                   </div>
                 </div>
               </div>
 
+              {/* SECTION 3: CATEGORY & REMARKS */}
               <div className="space-y-3">
                 <div>
                   <label className="text-xs font-bold text-slate-700 block mb-1">Defect Classification</label>
@@ -535,6 +615,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
                 </div>
               </div>
 
+              {/* ACTION BUTTON */}
               <div className="space-y-2">
                 <button
                   type="submit"

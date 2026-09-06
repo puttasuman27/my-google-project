@@ -1,21 +1,16 @@
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-import tailwindcss from '@tailwindcss/vite';
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
 
 export default defineConfig({
-  plugins: [
-    react(),
-    tailwindcss()
-  ],
+  plugins: [react()],
   server: {
-    host: true,
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'https://civicpulse-api-766265720432.us-central1.run.app',
         changeOrigin: true,
-        secure: false,
-      },
-    },
-  },
-});
+        secure: true,
+      }
+    }
+  }
+})
