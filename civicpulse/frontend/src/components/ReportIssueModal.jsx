@@ -117,7 +117,6 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
         setIsLocating(false);
         setLocationMsg('GPS Locked');
 
-        // Reverse-geocode to real address
         try {
           const res = await fetch(`/api/v1/reverse-geocode?lat=${latitude}&lng=${longitude}`);
           const data = await res.json();
@@ -137,7 +136,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
     );
   };
 
-  // 🗺️ Click on Map -> Reverse Geocode to street name
+  // 🗺️ Click on Map -> Reverse Geocode
   const handleMapPin = async (lat, lng) => {
     setCoords({ lat, lng });
     setLocationMsg('Pin Updated');
@@ -153,7 +152,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
     setTimeout(() => setLocationMsg(''), 3000);
   };
 
-  // 🔍 Geocoding Search (Find places, landmarks, streets)
+  // 🔍 Geocoding Search
   const handleAddressSearch = async (queryText) => {
     setAddressQuery(queryText);
     if (!queryText || queryText.length < 3) {
@@ -218,6 +217,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
     setIsCameraOpen(false);
   };
 
+  // 🚀 SUBMIT TO FASTAPI BACKEND (Resilient error handling)
   const handleFormSubmit = async (e) => {
     e.preventDefault();
     if (!previewImage && !imageUri) {
@@ -254,8 +254,8 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
       setAgentResponse(data);
 
       const incidentForFeed = {
-        id: data.incident_id,
-        incident_id: data.incident_id,
+        id: data.incident_id || `INC-${Math.random().toString(36).substring(2, 9).toUpperCase()}`,
+        incident_id: data.incident_id || `INC-${Math.random().toString(36).substring(2, 9).toUpperCase()}`,
         title: `${data.analysis?.category || category} Hazard`,
         category: data.analysis?.category || category,
         location: addressQuery,
@@ -269,10 +269,19 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
         status: "IN_PROGRESS",
         reportsMerged: data.duplicate_count || 1,
         image: previewImage || imageUri,
+        intake_image_url: previewImage || imageUri,
         reportedAt: "Just now"
       };
 
-      if (onReportSuccess) onReportSuccess(incidentForFeed, data);
+      // Safely notify parent feed without throwing if callback fails
+      try {
+        if (typeof onReportSuccess === 'function') {
+          onReportSuccess(incidentForFeed, data);
+        }
+      } catch (parentErr) {
+        console.warn("Parent callback notice:", parentErr);
+      }
+
     } catch (err) {
       console.error("Agent Pipeline Error:", err);
       setErrorMessage(err.message || "Failed to submit incident.");
@@ -287,9 +296,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-5">
       <div className="bg-white rounded-[32px] p-6 sm:p-8 max-w-2xl w-full max-h-[92vh] overflow-y-auto space-y-5 shadow-2xl border border-slate-100">
         
-        {/* ========================================================= */}
-        {/* SUCCESS POPUP SCREEN                                      */}
-        {/* ========================================================= */}
+        {/* SUCCESS POPUP SCREEN */}
         {agentResponse ? (
           <div className="space-y-6 py-2 animate-in fade-in zoom-in duration-300">
             <div className="text-center space-y-2">
@@ -324,7 +331,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
               </p>
             </div>
 
-            {/* Structured Resolution Intelligence Breakdown */}
+            {/* Telemetry Breakdown */}
             <div className="bg-[#F4F8F6] border border-emerald-900/10 rounded-[24px] p-5 space-y-4">
               <div className="flex items-center justify-between border-b border-emerald-900/10 pb-3">
                 <div>
@@ -341,7 +348,6 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
-                {/* Gemini Vision Classification */}
                 <div className="bg-white p-3 rounded-xl border border-slate-100 shadow-sm">
                   <span className="text-[10px] text-slate-400 font-bold block mb-0.5">Hazard Type</span>
                   <strong className="text-slate-800 text-xs block truncate">
@@ -352,7 +358,6 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
                   </span>
                 </div>
 
-                {/* Routing Department */}
                 <div className="bg-white p-3 rounded-xl border border-slate-100 shadow-sm">
                   <span className="text-[10px] text-slate-400 font-bold block mb-0.5">Assigned Unit</span>
                   <strong className="text-slate-800 text-xs block truncate">
@@ -363,7 +368,6 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
                   </span>
                 </div>
 
-                {/* SLA Deadline */}
                 <div className="bg-white p-3 rounded-xl border border-slate-100 shadow-sm col-span-2 sm:col-span-1">
                   <span className="text-[10px] text-slate-400 font-bold block mb-0.5">SLA Priority</span>
                   <div className="flex items-center gap-1">
@@ -390,9 +394,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
             </button>
           </div>
         ) : (
-          /* ========================================================= */
-          /* FORM VIEW                                                 */
-          /* ========================================================= */
+          /* FORM VIEW */
           <>
             <div className="flex justify-between items-start pb-2 border-b border-slate-100">
               <div>
@@ -445,7 +447,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
               <div className="bg-red-50 border border-red-200 p-4 rounded-2xl flex items-start gap-3 text-xs text-red-700 font-medium">
                 <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
                 <div className="space-y-1">
-                  <strong className="font-black text-red-800 block text-xs">Validation Rejected</strong>
+                  <strong className="font-black text-red-800 block text-xs">Validation Notice</strong>
                   <p>{errorMessage}</p>
                 </div>
               </div>
@@ -509,7 +511,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
                 </div>
               </div>
 
-              {/* SECTION 2: MAP LOCATION WITH GEOCODING SEARCH */}
+              {/* SECTION 2: MAP LOCATION */}
               <div className="space-y-2.5">
                 <div className="flex justify-between items-center">
                   <label className="text-xs font-black uppercase text-slate-700 tracking-wider">
@@ -522,7 +524,6 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
                   )}
                 </div>
 
-                {/* Geocoding Search Input with Auto-Complete Dropdown */}
                 <div className="relative">
                   <div className="flex gap-2">
                     <div className="relative flex-1">
@@ -550,7 +551,6 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
                     </button>
                   </div>
 
-                  {/* Search Autocomplete List */}
                   {searchResults.length > 0 && (
                     <div className="absolute top-12 left-0 right-0 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 overflow-hidden divide-y divide-slate-100 max-h-48 overflow-y-auto">
                       {searchResults.map((item, idx) => (
@@ -572,7 +572,6 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
                   )}
                 </div>
 
-                {/* Leaflet Map with Recenter */}
                 <div className="rounded-2xl overflow-hidden border border-slate-200 shadow-inner h-44 relative z-0">
                   <MapContainer center={[coords.lat, coords.lng]} zoom={15} scrollWheelZoom={false} className="w-full h-full">
                     <TileLayer attribution='&copy; OpenStreetMap' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
@@ -615,7 +614,7 @@ export default function ReportIssueModal({ isOpen, onClose, onReportSuccess }) {
                 </div>
               </div>
 
-              {/* ACTION BUTTON */}
+              {/* SUBMIT BUTTON */}
               <div className="space-y-2">
                 <button
                   type="submit"

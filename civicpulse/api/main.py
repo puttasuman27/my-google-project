@@ -5,12 +5,20 @@ import urllib.request
 import urllib.parse
 import json
 import logging
+from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Query, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from google.cloud import bigquery
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(dotenv_path=BASE_DIR / ".env", override=True)
+
+creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+if creds_path and not os.path.exists(creds_path):
+    os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+
+from google.cloud import bigquery
 from agents.vision_agent import VisionAgent
 from agents.incident_agent import IncidentAgent
 from agents.operations_agent import OperationsAgent
@@ -19,9 +27,8 @@ from services.firestore_service import FirestoreService
 from services.pubsub_service import PubSubService
 
 logger = logging.getLogger(__name__)
-load_dotenv()
 
-app = FastAPI(title="CivicPulse Core API", version="3.6.0")
+app = FastAPI(title="CivicPulse Core API", version="3.9.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,11 +51,15 @@ BQ_DATASET = os.getenv("BIGQUERY_DATASET", "civicpulse_analytics")
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "service": "civicpulse-agentic-core", "version": "3.6.0"}
+    return {
+        "status": "healthy",
+        "service": "civicpulse-agentic-core",
+        "version": "3.9.0"
+    }
 
 
 # ============================================================================
-# 🗺️ GEOCODING & REVERSE GEOCODING
+# 🗺️ 1. GEOCODING & REVERSE GEOCODING PROXY
 # ============================================================================
 @app.get("/api/v1/geocode")
 def geocode_search(query: str = Query(..., min_length=2)):
@@ -57,7 +68,7 @@ def geocode_search(query: str = Query(..., min_length=2)):
         url = f"https://nominatim.openstreetmap.org/search?q={encoded_q}&format=json&limit=5&addressdetails=1"
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "CivicPulse-Municipal-AI/3.6 (contact: puttasuman27@gmail.com)"}
+            headers={"User-Agent": "CivicPulse-Municipal-AI/3.9 (contact: puttasuman27@gmail.com)"}
         )
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
@@ -75,7 +86,7 @@ def geocode_search(query: str = Query(..., min_length=2)):
                 })
             return {"query": query, "results": results}
     except Exception as e:
-        logger.warning(f"Geocoding lookup fallback: {e}")
+        logger.warning(f"Geocoding fallback: {e}")
         return {
             "query": query,
             "results": [{
@@ -93,12 +104,12 @@ def reverse_geocode(lat: float = Query(...), lng: float = Query(...)):
         url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lng}&format=json"
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "CivicPulse-Municipal-AI/3.6 (contact: puttasuman27@gmail.com)"}
+            headers={"User-Agent": "CivicPulse-Municipal-AI/3.9 (contact: puttasuman27@gmail.com)"}
         )
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
             addr = data.get("address", {})
-            street = addr.get("road") or addr.get("suburb") or addr.get("neighbourhood") or "Arterial Road"
+            street = addr.get("road") or addr.get("suburb") or addr.get("neighbourhood") or "Main Arterial Road"
             city = addr.get("city") or addr.get("town") or "Metro Core"
             ward_num = int((lat % 1) * 100)
             formatted = f"{street}, Ward-{ward_num:02d}, {city}"
@@ -119,28 +130,30 @@ def reverse_geocode(lat: float = Query(...), lng: float = Query(...)):
 
 
 # ============================================================================
-# 🔐 AUTHENTICATION ENDPOINT
+# 🔐 2. AUTHENTICATION (PUTTA SUMAN VERIFIED COMMISSIONER)
 # ============================================================================
 @app.post("/api/v1/auth/login")
 async def login_user(payload: dict = Body(...)):
-    email = payload.get("email", "").strip().lower()
-    password = payload.get("password", "").strip()
+    email = str(payload.get("email", "")).strip().lower()
+    password = str(payload.get("password", "")).strip()
 
     if not email or not password:
         raise HTTPException(status_code=400, detail="Email and password are required.")
 
-    # Default Officer profile fallback
     if email == "puttasuman27@gmail.com" and password == "12345678":
         user_profile = firestore_service.set_user_role(
             email="puttasuman27@gmail.com",
-            name="Sumanth Puttaswamy",
+            name="Putta Suman",
             role="MUNICIPAL_COMMISSIONER",
             assigned_ward="ALL",
-            designation="Chief Municipal Operations Officer"
+            designation="Chief Municipal Operations Commissioner"
         )
         return {"success": True, "user": user_profile}
 
     try:
+        if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ and not os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
+            os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+
         client = bigquery.Client(project=GCP_PROJECT)
         query = f"""
             SELECT admin_id, name, email, role, assigned_ward, designation
@@ -159,25 +172,28 @@ async def login_user(payload: dict = Body(...)):
         if rows:
             admin_data = dict(rows[0])
             synced_profile = firestore_service.set_user_role(
-                email=admin_data["email"],
-                name=admin_data["name"],
-                role=admin_data["role"],
-                assigned_ward=admin_data["assigned_ward"],
-                designation=admin_data.get("designation", "Municipal Officer")
+                email=str(admin_data.get("email", "")),
+                name=str(admin_data.get("name", "Municipal Official")),
+                role=str(admin_data.get("role", "ADMIN")),
+                assigned_ward=str(admin_data.get("assigned_ward", "ALL")),
+                designation=str(admin_data.get("designation", "Municipal Officer"))
             )
             return {"success": True, "user": synced_profile}
     except Exception as e:
-        logger.error(f"BigQuery Auth check error: {e}")
+        logger.warning(f"BigQuery auth check notice: {e}")
 
-    firestore_user = firestore_service.get_user_role(email)
-    if firestore_user and firestore_user.get("is_verified_admin"):
-        return {"success": True, "user": firestore_user}
+    try:
+        firestore_user = firestore_service.get_user_role(email)
+        if firestore_user and firestore_user.get("is_verified_admin"):
+            return {"success": True, "user": firestore_user}
+    except Exception as e:
+        logger.warning(f"Firestore role check notice: {e}")
 
     raise HTTPException(status_code=401, detail="Invalid government email or password credentials.")
 
 
 # ============================================================================
-# 🚨 INCIDENTS LIST (FAIL-SAFE - NEVER THROWS UNHANDLED 500)
+# 🚨 3. FETCH INCIDENTS
 # ============================================================================
 @app.get("/api/v1/incidents")
 def list_canonical_incidents(
@@ -186,6 +202,9 @@ def list_canonical_incidents(
     limit: int = Query(60, le=200)
 ):
     try:
+        if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ and not os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
+            os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+
         client = bigquery.Client(project=GCP_PROJECT)
         
         conditions = [
@@ -206,7 +225,6 @@ def list_canonical_incidents(
         
         where_clause = "WHERE " + " AND ".join(conditions)
 
-        # Resilient query with COALESCE and safe column selections
         query = f"""
             SELECT 
                 incident_id, 
@@ -231,9 +249,7 @@ def list_canonical_incidents(
 
         try:
             rows = client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-        except Exception as query_err:
-            # Fallback if image columns don't exist yet
-            logger.warning(f"Full column query failed ({query_err}), falling back to base columns...")
+        except Exception:
             fallback_query = f"""
                 SELECT 
                     incident_id, 
@@ -261,23 +277,21 @@ def list_canonical_incidents(
             for k in ["created_at", "updated_at", "sla_deadline"]:
                 if rec.get(k):
                     rec[k] = str(rec[k])
-            # Ensure keys exist
-            if "intake_image_url" not in rec:
+            if "intake_image_url" not in rec or not rec.get("intake_image_url"):
                 rec["intake_image_url"] = ""
-            if "resolved_image_url" not in rec:
+            if "resolved_image_url" not in rec or not rec.get("resolved_image_url"):
                 rec["resolved_image_url"] = ""
             incidents.append(rec)
 
         return {"total": len(incidents), "incidents": incidents}
 
     except Exception as e:
-        logger.error(f"Error fetching incidents from BigQuery: {e}")
-        # Return empty list on failure so UI does not crash
+        logger.error(f"Error fetching BigQuery incidents: {e}")
         return {"total": 0, "incidents": []}
 
 
 # ============================================================================
-# 🚨 REPORT DEFECT
+# 🚨 4. REPORT INGESTION
 # ============================================================================
 @app.post("/api/v1/reports")
 async def report_issue(request: Request):
@@ -314,7 +328,6 @@ async def report_issue(request: Request):
             longitude = float(form.get("longitude") or 78.42035)
             citizen_notes = form.get("citizen_notes") or form.get("description_text") or ""
 
-        # 1. Vision Analysis & Validation
         vision_result = vision_agent.analyze_image(image_bytes, mime_type)
 
         if not vision_result.is_valid_civic_issue:
@@ -323,7 +336,6 @@ async def report_issue(request: Request):
                 detail=vision_result.rejection_reason or "Uploaded photo is not a valid municipal infrastructure hazard."
             )
 
-        # 2. Pub/Sub Ingestion Event
         pubsub_msg_id = pubsub_service.publish_incident_report({
             "category": vision_result.category,
             "latitude": latitude,
@@ -332,7 +344,6 @@ async def report_issue(request: Request):
             "citizen_notes": citizen_notes
         })
 
-        # 3. BigQuery Deduplication
         cluster = incident_agent.process_and_cluster(
             vision_result=vision_result,
             lat=latitude,
@@ -342,7 +353,6 @@ async def report_issue(request: Request):
             road_class=road_class
         )
 
-        # 4. Operations Routing
         ops = operations_agent.route_and_assign_sla(
             incident_id=cluster.canonical_incident_id,
             category=vision_result.category,
@@ -386,6 +396,9 @@ async def report_issue(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# 🚦 5. DISPATCH STATUS UPDATE
+# ============================================================================
 @app.patch("/api/v1/incidents/{incident_id}/status")
 async def update_incident_status(
     incident_id: str,
@@ -394,6 +407,9 @@ async def update_incident_status(
     new_status = payload.get("status", "IN_PROGRESS").upper().strip()
     target_id = incident_id.strip()
     try:
+        if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ and not os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
+            os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+
         client = bigquery.Client(project=GCP_PROJECT)
         table_ref = f"`{GCP_PROJECT}.{BQ_DATASET}.incidents`"
         
@@ -416,6 +432,9 @@ async def update_incident_status(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# 🔍 6. RESOLVE INCIDENT
+# ============================================================================
 @app.post("/api/v1/incidents/{incident_id}/resolve")
 async def resolve_incident_with_verification(
     incident_id: str,
@@ -433,15 +452,16 @@ async def resolve_incident_with_verification(
             mime_type = header.split(";")[0].split(":")[1] if ":" in header else "image/jpeg"
             image_bytes = base64.b64decode(base64_data)
 
-        # 1. Gemini Resolution Verification
         audit = resolution_agent.verify_resolution(
             after_image_bytes=image_bytes,
             category=category,
             mime_type=mime_type
         )
 
-        # 2. Update BigQuery
         if audit.is_resolved:
+            if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ and not os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
+                os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+
             client = bigquery.Client(project=GCP_PROJECT)
             table_ref = f"`{GCP_PROJECT}.{BQ_DATASET}.incidents`"
             query = f"""
