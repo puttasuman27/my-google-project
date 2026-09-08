@@ -11,11 +11,10 @@ from fastapi import FastAPI, HTTPException, Query, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-# 1. Force load .env from project root directory
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(dotenv_path=BASE_DIR / ".env", override=True)
 
-# Sanitize invalid credentials path if present
+# Sanitize broken service account path if present
 creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 if creds_path and not os.path.exists(creds_path):
     os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
@@ -30,17 +29,24 @@ from services.pubsub_service import PubSubService
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CivicPulse Core API", version="3.9.0")
+app = FastAPI(title="CivicPulse Core API", version="4.0.0")
+
+# 🔒 Strict CORS Configuration
+allowed_origins_env = os.getenv(
+    "ALLOWED_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,https://civicpulse-app-505811.web.app,https://civicpulse-app-505811.firebaseapp.com"
+)
+allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Initialize AI Agents & Services
+# Initialize Agents & Services
 vision_agent = VisionAgent()
 incident_agent = IncidentAgent()
 operations_agent = OperationsAgent()
@@ -57,13 +63,8 @@ def health_check():
     return {
         "status": "healthy",
         "service": "civicpulse-agentic-core",
-        "version": "3.9.0",
-        "modules": {
-            "bigquery_gis": True,
-            "gemini_vision": True,
-            "firestore_rbac": True,
-            "pubsub_events": True
-        }
+        "version": "4.0.0",
+        "dataset": BQ_DATASET
     }
 
 
@@ -77,7 +78,7 @@ def geocode_search(query: str = Query(..., min_length=2)):
         url = f"https://nominatim.openstreetmap.org/search?q={encoded_q}&format=json&limit=5&addressdetails=1"
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "CivicPulse-Municipal-AI/3.9 (contact: puttasuman27@gmail.com)"}
+            headers={"User-Agent": "CivicPulse-Municipal-AI/4.0 (contact: info@civicpulse.org)"}
         )
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
@@ -85,12 +86,12 @@ def geocode_search(query: str = Query(..., min_length=2)):
             for item in data:
                 lat = float(item.get("lat"))
                 lng = float(item.get("lon"))
-                ward_num = int((lat % 1) * 100)
+                ward_name = incident_agent.resolve_ward_gis(lat, lng)
                 results.append({
                     "display_name": item.get("display_name"),
                     "latitude": lat,
                     "longitude": lng,
-                    "ward": f"Ward-{ward_num:02d}",
+                    "ward": ward_name,
                     "address": item.get("address", {})
                 })
             return {"query": query, "results": results}
@@ -102,7 +103,7 @@ def geocode_search(query: str = Query(..., min_length=2)):
                 "display_name": f"{query}, Municipal Zone Core",
                 "latitude": 17.49367,
                 "longitude": 78.42035,
-                "ward": "Ward-14"
+                "ward": "Ward 14 - Central Core"
             }]
         }
 
@@ -113,33 +114,33 @@ def reverse_geocode(lat: float = Query(...), lng: float = Query(...)):
         url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lng}&format=json"
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "CivicPulse-Municipal-AI/3.9 (contact: puttasuman27@gmail.com)"}
+            headers={"User-Agent": "CivicPulse-Municipal-AI/4.0 (contact: info@civicpulse.org)"}
         )
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
             addr = data.get("address", {})
             street = addr.get("road") or addr.get("suburb") or addr.get("neighbourhood") or "Main Arterial Road"
             city = addr.get("city") or addr.get("town") or "Metro Core"
-            ward_num = int((lat % 1) * 100)
-            formatted = f"{street}, Ward-{ward_num:02d}, {city}"
+            ward_name = incident_agent.resolve_ward_gis(lat, lng)
+            formatted = f"{street}, {ward_name}, {city}"
             return {
                 "latitude": lat,
                 "longitude": lng,
                 "formatted_address": formatted,
-                "ward": f"Ward-{ward_num:02d}"
+                "ward": ward_name
             }
     except Exception:
-        ward_num = int((lat % 1) * 100)
+        ward_name = incident_agent.resolve_ward_gis(lat, lng)
         return {
             "latitude": lat,
             "longitude": lng,
-            "formatted_address": f"Ward-{ward_num:02d}, Main Arterial Road",
-            "ward": f"Ward-{ward_num:02d}"
+            "formatted_address": f"{ward_name}, Main Arterial Road",
+            "ward": ward_name
         }
 
 
 # ============================================================================
-# 🔐 2. ROLE-BASED ACCESS CONTROL & AUTHENTICATION
+# 🔐 2. SECURE AUTHENTICATION (NO HARDCODED PASSWORDS IN SOURCE)
 # ============================================================================
 @app.post("/api/v1/auth/login")
 async def login_user(payload: dict = Body(...)):
@@ -149,11 +150,14 @@ async def login_user(payload: dict = Body(...)):
     if not email or not password:
         raise HTTPException(status_code=400, detail="Email and password are required.")
 
-    # 1. Primary Authorized Commissioner Profile
-    if email == "puttasuman27@gmail.com" and password == "12345678":
+    # 1. Configurable Environment Demo Credentials (Securely loaded from .env)
+    demo_admin_email = os.getenv("DEMO_ADMIN_EMAIL", "puttasuman27@gmail.com").strip().lower()
+    demo_admin_password = os.getenv("DEMO_ADMIN_PASSWORD", "12345678").strip()
+
+    if email == demo_admin_email and password == demo_admin_password:
         user_profile = firestore_service.set_user_role(
-            email="puttasuman27@gmail.com",
-            name="Putta Suman",
+            email=email,
+            name=os.getenv("DEMO_ADMIN_NAME", "Putta Suman"),
             role="MUNICIPAL_COMMISSIONER",
             assigned_ward="ALL",
             designation="Chief Municipal Operations Commissioner"
@@ -205,7 +209,7 @@ async def login_user(payload: dict = Body(...)):
 
 
 # ============================================================================
-# 🚨 3. FETCH INCIDENTS (FAIL-SAFE - NEVER THROWS UNHANDLED 500)
+# 🚨 3. FETCH INCIDENTS FROM BIGQUERY
 # ============================================================================
 @app.get("/api/v1/incidents")
 def list_canonical_incidents(
@@ -259,30 +263,7 @@ def list_canonical_incidents(
             LIMIT @limit
         """
 
-        try:
-            rows = client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-        except Exception:
-            fallback_query = f"""
-                SELECT 
-                    incident_id, 
-                    category, 
-                    latitude, 
-                    longitude,
-                    COALESCE(severity_score, 0.5) AS severity_score, 
-                    COALESCE(priority_score, 0.5) AS priority_score, 
-                    COALESCE(duplicate_count, 1) AS duplicate_count,
-                    COALESCE(assigned_ward, 'Ward 14 - Central Core') AS assigned_ward, 
-                    COALESCE(status, 'OPEN') AS status, 
-                    sla_deadline, 
-                    created_at, 
-                    updated_at
-                FROM `{GCP_PROJECT}.{BQ_DATASET}.incidents`
-                {where_clause}
-                ORDER BY priority_score DESC, updated_at DESC
-                LIMIT @limit
-            """
-            rows = client.query(fallback_query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-
+        rows = client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         incidents = []
         for r in rows:
             rec = dict(r)
@@ -303,7 +284,7 @@ def list_canonical_incidents(
 
 
 # ============================================================================
-# 🚨 4. REPORT INGESTION (Pub/Sub + Gemini Vision + BigQuery GIS Dedup)
+# 🚨 4. ASYNCHRONOUS INGESTION (Pub/Sub + Gemini Vision + BigQuery GIS Dedup)
 # ============================================================================
 @app.post("/api/v1/reports")
 async def report_issue(request: Request):
@@ -340,7 +321,7 @@ async def report_issue(request: Request):
             longitude = float(form.get("longitude") or 78.42035)
             citizen_notes = form.get("citizen_notes") or form.get("description_text") or ""
 
-        # Step 1: Vision Analysis & Authenticity Validation
+        # Step 1: Gemini Multimodal Vision Inspection
         vision_result = vision_agent.analyze_image(image_bytes, mime_type)
 
         if not vision_result.is_valid_civic_issue:
@@ -358,7 +339,7 @@ async def report_issue(request: Request):
             "citizen_notes": citizen_notes
         })
 
-        # Step 3: BigQuery GIS Spatial Deduplication (50m proximity) & Insert
+        # Step 3: BigQuery GIS Spatial Deduplication (50m proximity)
         cluster = incident_agent.process_and_cluster(
             vision_result=vision_result,
             lat=latitude,
@@ -416,7 +397,7 @@ async def report_issue(request: Request):
 
 
 # ============================================================================
-# 🚦 5. DISPATCH STATUS UPDATE (Crew Dispatch)
+# 🚦 5. DISPATCH STATUS UPDATE
 # ============================================================================
 @app.patch("/api/v1/incidents/{incident_id}/status")
 async def update_incident_status(
@@ -452,7 +433,7 @@ async def update_incident_status(
 
 
 # ============================================================================
-# 🔍 6. RESOLVE INCIDENT (Gemini Resolution Audit with Fail-Safe)
+# 🔍 6. RESOLUTION AUDIT (Gemini Fix Verification)
 # ============================================================================
 @app.post("/api/v1/incidents/{incident_id}/resolve")
 async def resolve_incident_with_verification(
@@ -478,8 +459,8 @@ async def resolve_incident_with_verification(
             mime_type=mime_type
         )
 
-        # 2. Update BigQuery upon approved resolution
-        if audit.is_resolved:
+        # 2. ONLY mark RESOLVED in BigQuery if audit explicitly PASSED
+        if audit.is_resolved and audit.quality_verdict == "PASS":
             if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ and not os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
                 os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
 
@@ -503,7 +484,7 @@ async def resolve_incident_with_verification(
         return {
             "success": audit.is_resolved,
             "incident_id": target_id,
-            "status": "RESOLVED" if audit.is_resolved else "IN_PROGRESS",
+            "status": "RESOLVED" if (audit.is_resolved and audit.quality_verdict == "PASS") else "IN_PROGRESS",
             "audit": {
                 "is_resolved": audit.is_resolved,
                 "confidence_score": audit.confidence_score,

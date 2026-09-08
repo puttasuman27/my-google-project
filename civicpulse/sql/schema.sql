@@ -1,40 +1,37 @@
--- Create BigQuery Dataset in asia-south1 if it does not exist
-CREATE SCHEMA IF NOT EXISTS `civicpulse_analytics`
-OPTIONS(location="asia-south1");
+-- Standardized Dataset: civicpulse_analytics
 
--- Reports Fact Table
-CREATE TABLE IF NOT EXISTS `civicpulse_analytics.reports` (
-  report_id STRING NOT NULL,
-  incident_id STRING NOT NULL,
-  citizen_id STRING,
-  category STRING,
-  severity_level STRING,
-  confidence_score FLOAT64,
-  safety_hazard BOOL,
-  image_uri STRING,
-  latitude FLOAT64,
-  longitude FLOAT64,
-  location GEOGRAPHY,
-  reported_at TIMESTAMP
-)
-PARTITION BY DATE(reported_at)
-CLUSTER BY category;
-
--- Incidents Canonical Table
 CREATE TABLE IF NOT EXISTS `civicpulse_analytics.incidents` (
-  incident_id STRING NOT NULL,
-  category STRING,
-  latitude FLOAT64,
-  longitude FLOAT64,
-  location GEOGRAPHY,
-  severity_score FLOAT64,
-  priority_score FLOAT64,
-  duplicate_count INT64,
-  assigned_ward STRING,
-  status STRING, -- OPEN, ASSIGNED, ESCALATED, RESOLVED_PENDING, CLOSED
-  sla_deadline TIMESTAMP,
-  created_at TIMESTAMP,
-  updated_at TIMESTAMP
-)
-PARTITION BY DATE(created_at)
-CLUSTER BY assigned_ward, status;
+    incident_id STRING NOT NULL,
+    category STRING NOT NULL,
+    latitude FLOAT64 NOT NULL,
+    longitude FLOAT64 NOT NULL,
+    location GEOGRAPHY,
+    severity_score FLOAT64,
+    priority_score FLOAT64,
+    duplicate_count INT64,
+    assigned_ward STRING,
+    status STRING,
+    intake_image_url STRING,
+    resolved_image_url STRING,
+    sla_deadline TIMESTAMP,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS `civicpulse_analytics.ward_boundaries` (
+    ward_id STRING NOT NULL,
+    ward_name STRING NOT NULL,
+    zone_name STRING,
+    boundary_geom GEOGRAPHY NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS `civicpulse_analytics.admins` (
+    admin_id STRING NOT NULL,
+    name STRING NOT NULL,
+    email STRING NOT NULL,
+    password_hash STRING NOT NULL,
+    role STRING NOT NULL,
+    assigned_ward STRING,
+    designation STRING,
+    created_at TIMESTAMP
+);

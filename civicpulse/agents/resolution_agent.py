@@ -18,7 +18,7 @@ class ResolutionVerificationResult(BaseModel):
     confidence_score: float
     explanation: str
     action_taken: str
-    quality_verdict: str
+    quality_verdict: str  # "PASS" | "NEEDS_REWORK" | "FAIL" | "INCONCLUSIVE"
 
 
 class ResolutionAgent:
@@ -40,9 +40,9 @@ class ResolutionAgent:
             try:
                 from google import genai
                 self.client = genai.Client(api_key=api_key)
-                logger.info("Gemini Resolution Agent initialized with API Key.")
+                logger.info("Gemini Resolution Agent initialized.")
             except Exception as e:
-                logger.warning(f"GenAI Client init notice: {e}")
+                logger.warning(f"GenAI Client init warning: {e}")
                 self.client = None
         else:
             self.client = None
@@ -57,25 +57,28 @@ class ResolutionAgent:
         if not self.client:
             self._init_client()
 
+        # 1. Reject empty or corrupted image bytes immediately
         if not after_image_bytes or len(after_image_bytes) < 50:
             return ResolutionVerificationResult(
                 is_resolved=False,
                 confidence_score=0.0,
-                explanation="No resolution image was provided or the file is invalid.",
+                explanation="No resolution image was provided or image is invalid.",
                 action_taken="NONE",
                 quality_verdict="FAIL"
             )
 
+        # 2. FAIL-SAFE RULE: If Gemini client is unavailable, NEVER automatically PASS
         if not self.client:
-            logger.info("Using smart resolution verification engine.")
+            logger.warning("Gemini Client unavailable during resolution audit. Escalating to human supervisor.")
             return ResolutionVerificationResult(
-                is_resolved=True,
-                confidence_score=0.96,
-                explanation=f"Field repair for {category} inspected and verified. Resurfacing and hazard clearance meets municipal standards.",
-                action_taken="PHYSICAL_DEFECT_RECTIFIED",
-                quality_verdict="PASS"
+                is_resolved=False,
+                confidence_score=0.0,
+                explanation="Automated verification service unavailable. Ticket flagged as INCONCLUSIVE for mandatory field supervisor inspection.",
+                action_taken="HUMAN_REVIEW_REQUIRED",
+                quality_verdict="INCONCLUSIVE"
             )
 
+        # 3. Live Gemini Multimodal Resolution Verification
         prompt = f"""
         You are an expert Municipal Infrastructure Quality Auditor AI.
         Inspect this submitted field repair photo for a reported civic issue of category: '{category}'.
@@ -83,7 +86,7 @@ class ResolutionAgent:
         AUDIT CRITERIA:
         1. Determine if the reported defect (e.g. pothole asphalt, drainage, streetlight, garbage) has been addressed and repaired.
         2. If the photo shows a completed repair, clean road surface, or cleared hazard, set "is_resolved": true and "quality_verdict": "PASS".
-        3. Only set "is_resolved": false and "quality_verdict": "FAIL" if the hazard is still completely unresolved, dangerous, or the photo is completely blank.
+        3. If the hazard is still present, substandard, or location is mismatched, set "is_resolved": false and "quality_verdict": "FAIL" or "NEEDS_REWORK".
 
         Return ONLY a JSON object with this exact structure:
         {{
@@ -109,7 +112,7 @@ class ResolutionAgent:
 
             for attempt in range(2):
                 try:
-                    logger.info(f"Auditing resolution with Gemini model: {model} (attempt {attempt + 1})")
+                    logger.info(f"Auditing resolution with model: {model} (attempt {attempt + 1})")
                     response = self.client.models.generate_content(
                         model=model,
                         contents=contents,
@@ -136,10 +139,11 @@ class ResolutionAgent:
                         break
                     time.sleep(0.5)
 
+        # 4. FAIL-SAFE RULE: LLM failure/timeout routes to manual inspection
         return ResolutionVerificationResult(
-            is_resolved=True,
-            confidence_score=0.94,
-            explanation=f"Repair completion for {category} defect verified and approved under municipal resolution protocol.",
-            action_taken="SURFACE_RESTORED_AND_VERIFIED",
-            quality_verdict="PASS"
+            is_resolved=False,
+            confidence_score=0.0,
+            explanation="Automated visual verification timed out. Flagged as INCONCLUSIVE for manual quality inspection.",
+            action_taken="HUMAN_REVIEW_REQUIRED",
+            quality_verdict="INCONCLUSIVE"
         )
