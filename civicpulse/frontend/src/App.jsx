@@ -26,15 +26,16 @@ import {
   User,
   Target,
   Zap,
-  Award
+  Award,
+  Menu
 } from 'lucide-react';
 
-// Original puddle-reflection street hazard demonstration photo
-const SAMPLE_ROAD_DEFECT_IMG = "https://images.unsplash.com/photo-1515162816999-a0c47dc192f7?auto=format&fit=crop&w=1200&q=80";
+const DEFAULT_DEFECT_FALLBACK = "https://images.unsplash.com/photo-1515162816999-a0c47dc192f7?auto=format&fit=crop&w=1200&q=80";
 
 const normalizeIncident = (item) => {
   if (!item) return null;
   const id = item.incident_id || item.id || `INC-${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
+
   const cat = (item.category || "POTHOLE").toUpperCase();
   const ward = item.assigned_ward || item.ward || "Ward 14 - Central Core";
   const lat = item.latitude ? Number(item.latitude).toFixed(4) : null;
@@ -47,8 +48,7 @@ const normalizeIncident = (item) => {
   if (prioScore >= 0.8) severity = "P1 - Critical";
   else if (prioScore >= 0.5) severity = "P1 - High";
 
-  const rawIntake = item.intake_image_url || item.image || "";
-  const rawResolved = item.resolved_image_url || "";
+  const rawIntake = (item.intake_image_url || item.image || "").trim();
 
   return {
     id: id,
@@ -68,8 +68,7 @@ const normalizeIncident = (item) => {
     status: (item.status || "OPEN").toUpperCase().trim(),
     reportsMerged: reportsMerged,
     intake_image_url: rawIntake,
-    resolved_image_url: rawResolved,
-    image: rawIntake || rawResolved || SAMPLE_ROAD_DEFECT_IMG
+    image: rawIntake || DEFAULT_DEFECT_FALLBACK
   };
 };
 
@@ -77,6 +76,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('home');
   const [incidents, setIncidents] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Verified Officer Profile: Putta Suman
   const [currentUser, setCurrentUser] = useState({
@@ -117,6 +117,15 @@ export default function App() {
     return () => clearInterval(interval);
   }, [isAutoSliding, sliderDirection]);
 
+  const handleTouchMove = (e) => {
+    setIsAutoSliding(false);
+    const touch = e.touches[0];
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = touch.clientX - rect.left;
+    const percent = Math.max(5, Math.min(95, (x / rect.width) * 100));
+    setSliderPos(percent);
+  };
+
   const showToast = (toast) => {
     if (!toast) return;
     setToastNotification(toast);
@@ -136,7 +145,7 @@ export default function App() {
           const rawList = Array.isArray(data) ? data : (data.incidents || []);
           const validList = rawList
             .map(normalizeIncident)
-            .filter(item => item && (item.category || item.title));
+            .filter(item => item && item.id && (item.category || item.title));
           setIncidents(validList);
         }
       }
@@ -149,6 +158,8 @@ export default function App() {
 
   useEffect(() => {
     fetchIncidentsFromBQ();
+    const interval = setInterval(fetchIncidentsFromBQ, 4000);
+    return () => clearInterval(interval);
   }, []);
 
   const toggleUpvote = (id) => {
@@ -193,21 +204,7 @@ export default function App() {
       if (!normalized) return;
       const targetId = (normalized.incident_id || normalized.id || '').trim();
 
-      setIncidents(prev => {
-        const existingIndex = prev.findIndex(item => (item.incident_id || item.id || '').trim() === targetId);
-        if (existingIndex !== -1) {
-          const updated = [...prev];
-          updated[existingIndex] = {
-            ...updated[existingIndex],
-            reportsMerged: normalized.reportsMerged,
-            upvotes: (updated[existingIndex].upvotes || 1) + 1,
-            severityScore: normalized.severityScore,
-            severity: normalized.severity
-          };
-          return updated;
-        }
-        return [normalized, ...prev];
-      });
+      setIncidents(prev => [normalized, ...prev.filter(i => (i.incident_id || i.id || '').trim() !== targetId)]);
 
       if (rawAgentResponse?.is_duplicate) {
         showToast({
@@ -224,12 +221,15 @@ export default function App() {
           id: rawAgentResponse?.incident_id || targetId
         });
       }
+
+      setTimeout(fetchIncidentsFromBQ, 1000);
     } catch (e) {
       console.warn("Notice in handleAddNewReport:", e);
     }
   };
 
   const handleAdminPortalClick = () => {
+    setMobileMenuOpen(false);
     if (currentUser?.is_verified_admin) {
       setActiveTab('portal');
     } else {
@@ -237,37 +237,35 @@ export default function App() {
     }
   };
 
-  // Case INC-7B809F4B is prioritized for the Citizen Hub slider with the sample image
-  const activeShowcase = incidents.find(i => (i.incident_id || i.id) === 'INC-7B809F4B') || incidents[0] || {
-    id: "INC-7B809F4B",
-    title: "Primary Road Subsidence Defect",
-    ward: "Ward-94",
-    location: "Ward-94 (12.9413, 77.7039)",
-    category: "POTHOLE",
-    status: "OPEN",
-    intake_image_url: SAMPLE_ROAD_DEFECT_IMG,
-    resolved_image_url: SAMPLE_ROAD_DEFECT_IMG
+  // Select the active incident to display in the showcase slider
+  const activeShowcase = incidents[0] || {
+    id: "INC-8FD1B6F3",
+    title: "Garbage Defect Hazard",
+    ward: "Ward-49",
+    location: "Ward-49 (17.4937, 78.4203)",
+    category: "GARBAGE",
+    status: "OPEN"
   };
 
-  const beforePhoto = activeShowcase?.intake_image_url || SAMPLE_ROAD_DEFECT_IMG;
-  const afterPhoto = activeShowcase?.resolved_image_url || SAMPLE_ROAD_DEFECT_IMG;
+  // ✅ Single Initial Image is used for BOTH sides
+  const singleImageOnly = activeShowcase?.intake_image_url || activeShowcase?.image || DEFAULT_DEFECT_FALLBACK;
 
   return (
     <div className="min-h-screen bg-[#F4F8F6] text-slate-800 font-sans flex flex-col items-center relative">
       
       {/* 🔔 FLOATING TOAST NOTIFICATION */}
       {toastNotification && (
-        <div className="fixed top-20 right-5 z-[9999] max-w-md w-full animate-in slide-in-from-top-4 duration-300">
-          <div className="p-4 rounded-2xl shadow-2xl border flex items-start justify-between gap-3 bg-[#0B4D3C] text-white border-emerald-700">
-            <div className="flex items-start gap-3">
-              <div className="p-2 rounded-xl bg-[#F97316] text-white shrink-0 mt-0.5">
-                {toastNotification.type === 'merge' ? <Layers className="w-5 h-5" /> : <Sparkles className="w-5 h-5" />}
+        <div className="fixed top-20 right-4 sm:right-5 z-[9999] max-w-sm sm:max-w-md w-full animate-in slide-in-from-top-4 duration-300">
+          <div className="p-3.5 sm:p-4 rounded-2xl shadow-2xl border flex items-start justify-between gap-3 bg-[#0B4D3C] text-white border-emerald-700">
+            <div className="flex items-start gap-2.5 sm:gap-3">
+              <div className="p-1.5 sm:p-2 rounded-xl bg-[#F97316] text-white shrink-0 mt-0.5">
+                {toastNotification.type === 'merge' ? <Layers className="w-4 h-4 sm:w-5 sm:h-5" /> : <Sparkles className="w-4 h-4 sm:w-5 sm:h-5" />}
               </div>
               <div className="space-y-0.5">
-                <span className="text-xs font-black uppercase text-[#F97316] tracking-wider">
+                <span className="text-[11px] sm:text-xs font-black uppercase text-[#F97316] tracking-wider">
                   {toastNotification.title}
                 </span>
-                <p className="text-xs text-emerald-100 font-medium leading-tight">
+                <p className="text-[11px] sm:text-xs text-emerald-100 font-medium leading-tight">
                   {toastNotification.message}
                 </p>
               </div>
@@ -283,20 +281,21 @@ export default function App() {
       )}
 
       {/* 1. TOP NAVBAR */}
-      <header className="w-full bg-[#0B4D3C] text-white px-6 sm:px-12 py-4 sticky top-0 z-50 shadow-md">
+      <header className="w-full bg-[#0B4D3C] text-white px-4 sm:px-12 py-3.5 sm:py-4 sticky top-0 z-50 shadow-md">
         <div className="max-w-6xl mx-auto flex justify-between items-center">
           <div
-            className="flex items-center space-x-3 cursor-pointer"
-            onClick={() => setActiveTab('home')}
+            className="flex items-center space-x-2.5 sm:space-x-3 cursor-pointer"
+            onClick={() => { setActiveTab('home'); setMobileMenuOpen(false); }}
           >
-            <div className="w-4 h-4 rounded-full bg-[#F97316] ring-4 ring-[#F97316]/30"></div>
+            <div className="w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-full bg-[#F97316] ring-4 ring-[#F97316]/30"></div>
             <div className="flex flex-col">
-              <span className="text-xl font-black tracking-tight leading-none">CivicPulse AI</span>
-              <span className="text-[10px] text-emerald-200 font-semibold tracking-wider">Resolution Intelligence</span>
+              <span className="text-lg sm:text-xl font-black tracking-tight leading-none">CivicPulse AI</span>
+              <span className="text-[9px] sm:text-[10px] text-emerald-200 font-semibold tracking-wider">Resolution Intelligence</span>
             </div>
           </div>
 
-          <nav className="flex items-center space-x-2">
+          {/* Desktop Nav */}
+          <nav className="hidden md:flex items-center space-x-2">
             <button
               onClick={() => setActiveTab('home')}
               className={`px-3.5 py-2 rounded-xl text-xs font-bold transition ${
@@ -366,93 +365,141 @@ export default function App() {
               </button>
             )}
           </nav>
+
+          {/* Mobile Menu Toggle */}
+          <div className="flex items-center gap-2 md:hidden">
+            <button
+              onClick={() => setShowReportModal(true)}
+              className="bg-[#F97316] text-white p-2 rounded-xl text-xs font-bold"
+            >
+              <Camera className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              className="p-2 rounded-xl bg-emerald-900/60 text-white"
+            >
+              {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+            </button>
+          </div>
         </div>
+
+        {mobileMenuOpen && (
+          <div className="md:hidden pt-3 pb-2 space-y-1.5 border-t border-emerald-800/80 mt-3 animate-in slide-in-from-top-2">
+            <button
+              onClick={() => { setActiveTab('home'); setMobileMenuOpen(false); }}
+              className="w-full text-left px-3 py-2 rounded-xl text-xs font-bold text-white bg-emerald-900/40"
+            >
+              Citizen Hub
+            </button>
+            <button
+              onClick={() => { setActiveTab('goals'); setMobileMenuOpen(false); }}
+              className="w-full text-left px-3 py-2 rounded-xl text-xs font-bold text-white bg-emerald-900/40"
+            >
+              Mission & Goals
+            </button>
+            <button
+              onClick={handleAdminPortalClick}
+              className="w-full text-left px-3 py-2 rounded-xl text-xs font-bold text-white bg-emerald-900/40"
+            >
+              Admin Operations Portal
+            </button>
+            <button
+              onClick={() => { setActiveTab('access'); setMobileMenuOpen(false); }}
+              className="w-full text-left px-3 py-2 rounded-xl text-xs font-bold text-emerald-300 bg-emerald-950/60"
+            >
+              Role & Sign In: {currentUser?.name}
+            </button>
+          </div>
+        )}
       </header>
 
-      {/* 2. MAIN CONTENT VIEW CONTROLLER */}
-      <main className="w-full max-w-6xl px-4 sm:px-6 py-6 space-y-8 flex-1">
+      {/* 2. MAIN CONTENT */}
+      <main className="w-full max-w-6xl px-3 sm:px-6 py-5 sm:py-6 space-y-6 sm:space-y-8 flex-1">
         
         {activeTab === 'home' ? (
           <>
             {/* HERO BANNER */}
             <section
-              className="relative w-full rounded-[36px] overflow-hidden shadow-xl bg-cover bg-center border border-emerald-900/20"
+              className="relative w-full rounded-[28px] sm:rounded-[36px] overflow-hidden shadow-xl bg-cover bg-center border border-emerald-900/20"
               style={{
                 backgroundImage: `linear-gradient(to right, rgba(11, 77, 60, 0.94) 0%, rgba(11, 77, 60, 0.78) 55%, rgba(11, 77, 60, 0.45) 100%), url(${heroBg})`,
-                minHeight: '400px'
+                minHeight: '380px'
               }}
             >
-              <div className="p-8 sm:p-12 max-w-2xl text-white flex flex-col justify-center min-h-[400px]">
-                <span className="inline-flex items-center gap-1.5 bg-[#F97316] text-white text-[11px] font-black uppercase tracking-widest px-3.5 py-1 rounded-full w-fit mb-4 shadow-sm">
+              <div className="p-6 sm:p-12 max-w-2xl text-white flex flex-col justify-center min-h-[380px]">
+                <span className="inline-flex items-center gap-1.5 bg-[#F97316] text-white text-[10px] sm:text-[11px] font-black uppercase tracking-widest px-3 py-1 rounded-full w-fit mb-3 sm:mb-4 shadow-sm">
                   <TreePine className="w-3.5 h-3.5" /> Be The Change
                 </span>
                 
-                <h1 className="text-3xl sm:text-5xl font-black leading-tight tracking-tight">
+                <h1 className="text-2xl sm:text-5xl font-black leading-tight tracking-tight">
                   Building a Better, Cleaner City Together.
                 </h1>
                 
-                <p className="text-emerald-100 text-sm sm:text-base mt-3 leading-relaxed">
+                <p className="text-emerald-100 text-sm sm:text-base mt-2.5 sm:mt-3 leading-relaxed">
                   Transforming civic maintenance from a passive complaint log into active resolution intelligence. Powered by Gemini Multimodal Vision, BigQuery GIS, and real-time SLA tracking.
                 </p>
 
-                <div className="mt-8 flex flex-wrap gap-4">
+                <div className="mt-6 sm:mt-8 flex flex-wrap gap-3 sm:gap-4">
                   <button
                     onClick={() => setShowReportModal(true)}
-                    className="bg-[#F97316] hover:bg-orange-600 text-white font-extrabold text-sm px-6 py-3.5 rounded-2xl shadow-lg flex items-center space-x-2 transition transform active:scale-95"
+                    className="bg-[#F97316] hover:bg-orange-600 text-white font-extrabold text-xs sm:text-sm px-5 sm:px-6 py-3 sm:py-3.5 rounded-2xl shadow-lg flex items-center space-x-2 transition transform active:scale-95"
                   >
                     <Camera className="w-4 h-4" />
                     <span>Report Hazard or Trash</span>
                   </button>
 
-                  <a
-                    href="#diff-slider"
-                    className="bg-white/15 hover:bg-white/25 backdrop-blur-md border border-white/20 text-white font-bold text-sm px-6 py-3.5 rounded-2xl transition flex items-center space-x-2"
+                  <button
+                    onClick={() => {
+                      const el = document.getElementById('diff-slider');
+                      if (el) el.scrollIntoView({ behavior: 'smooth' });
+                    }}
+                    className="bg-white/15 hover:bg-white/25 backdrop-blur-md border border-white/20 text-white font-bold text-xs sm:text-sm px-5 sm:px-6 py-3 sm:py-3.5 rounded-2xl transition flex items-center space-x-2"
                   >
                     <span>Inspect AI Fix Verification</span>
                     <ArrowRight className="w-4 h-4" />
-                  </a>
+                  </button>
                 </div>
               </div>
             </section>
 
             {/* KPI METRICS */}
-            <section className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
-                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Active Incident Clusters</span>
-                <div className="text-2xl sm:text-3xl font-black text-slate-900 mt-1">{incidents.length}</div>
-                <span className="text-[10px] text-emerald-600 font-bold flex items-center mt-1">
-                  <TrendingUp className="w-3 h-3 mr-1" /> Synced with BigQuery
+            <section className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+              <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-100 shadow-sm">
+                <span className="text-[10px] sm:text-[11px] font-bold text-slate-400 uppercase tracking-wider">Active Clusters</span>
+                <div className="text-xl sm:text-3xl font-black text-slate-900 mt-1">{incidents.length}</div>
+                <span className="text-[9px] sm:text-[10px] text-emerald-600 font-bold flex items-center mt-1 truncate">
+                  <TrendingUp className="w-3 h-3 mr-1 shrink-0" /> BigQuery GIS Synced
                 </span>
               </div>
-              <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
-                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">AI Deduplication</span>
-                <div className="text-2xl sm:text-3xl font-black text-[#0B4D3C] mt-1">
+              <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-100 shadow-sm">
+                <span className="text-[10px] sm:text-[11px] font-bold text-slate-400 uppercase tracking-wider">Deduplication</span>
+                <div className="text-xl sm:text-3xl font-black text-[#0B4D3C] mt-1">
                   {incidents.length > 0 ? '68.4%' : '0%'}
                 </div>
-                <span className="text-[10px] text-slate-400 font-semibold mt-1 block">50m spatial clustering</span>
+                <span className="text-[9px] sm:text-[10px] text-slate-400 font-semibold mt-1 block">50m spatial cluster</span>
               </div>
-              <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
-                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Average SLA Turnaround</span>
-                <div className="text-2xl sm:text-3xl font-black text-[#F97316] mt-1">18.4 hrs</div>
-                <span className="text-[10px] text-emerald-600 font-bold mt-1 block">Within municipal threshold</span>
+              <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-100 shadow-sm">
+                <span className="text-[10px] sm:text-[11px] font-bold text-slate-400 uppercase tracking-wider">SLA Turnaround</span>
+                <div className="text-xl sm:text-3xl font-black text-[#F97316] mt-1">18.4 hrs</div>
+                <span className="text-[9px] sm:text-[10px] text-emerald-600 font-bold mt-1 block">Within threshold</span>
               </div>
-              <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
-                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Verified Resolution</span>
-                <div className="text-2xl sm:text-3xl font-black text-[#10B981] mt-1">
-                  {incidents.filter(i => i.status === 'RESOLVED').length} Done
+              <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-100 shadow-sm">
+                <span className="text-[10px] sm:text-[11px] font-bold text-slate-400 uppercase tracking-wider">Verified Fixes</span>
+                <div className="text-xl sm:text-3xl font-black text-[#10B981] mt-1">
+                  {incidents.filter(i => (i.status || '').toUpperCase() === 'RESOLVED').length} Closed
                 </div>
-                <span className="text-[10px] text-slate-400 font-semibold mt-1 block">Zero false closures</span>
+                <span className="text-[9px] sm:text-[10px] text-slate-400 font-semibold mt-1 block">Zero false closures</span>
               </div>
             </section>
 
-            {/* 3. DYNAMIC BEFORE & AFTER VERIFICATION SLIDER (Puddle Defect Sample) */}
-            <section id="diff-slider" className="bg-white p-6 sm:p-8 rounded-[32px] border border-slate-100 shadow-sm space-y-4">
+            {/* 3. DYNAMIC BEFORE & AFTER VERIFICATION SLIDER (Uses ONLY the initial first photo) */}
+            <section id="diff-slider" className="bg-white p-5 sm:p-8 rounded-[28px] sm:rounded-[32px] border border-slate-100 shadow-sm space-y-4 animate-in fade-in duration-300">
               <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3">
                 <div>
-                  <span className="inline-flex items-center gap-1 text-xs font-extrabold uppercase text-[#10B981] tracking-wider">
+                  <span className="inline-flex items-center gap-1 text-[10px] sm:text-xs font-extrabold uppercase text-[#10B981] tracking-wider">
                     <Sparkles className="w-3.5 h-3.5" /> Gemini Resolution Agent Audit
                   </span>
-                  <h3 className="text-xl sm:text-2xl font-black text-slate-900 mt-0.5">
+                  <h3 className="text-lg sm:text-2xl font-black text-slate-900 mt-0.5">
                     Interactive Before & After Verification Slider
                   </h3>
                   <p className="text-xs text-slate-500">
@@ -467,7 +514,7 @@ export default function App() {
                     title={isAutoSliding ? "Pause auto-slide" : "Resume auto-slide"}
                   >
                     {isAutoSliding ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 text-[#0B4D3C]" />}
-                    <span>{isAutoSliding ? "Auto-Scanning" : "Paused"}</span>
+                    <span>{isAutoSliding ? "Scanning" : "Paused"}</span>
                   </button>
                   <span className="bg-emerald-50 text-[#047857] text-xs font-bold px-3 py-1.5 rounded-xl border border-emerald-200">
                     {Math.round(sliderPos)}% Diff
@@ -475,48 +522,51 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Slider Viewport using ONLY the single first photo on both layers */}
               <div
-                className="relative w-full h-72 sm:h-96 rounded-2xl overflow-hidden select-none shadow-inner border border-slate-200 bg-slate-950"
+                className="relative w-full h-64 sm:h-96 rounded-2xl overflow-hidden select-none shadow-inner border border-slate-200 bg-slate-950 touch-none"
                 onMouseEnter={() => setIsAutoSliding(false)}
                 onMouseLeave={() => setIsAutoSliding(true)}
+                onTouchStart={() => setIsAutoSliding(false)}
+                onTouchMove={handleTouchMove}
               >
-                {/* AFTER VIEW */}
+                {/* AFTER VIEW (Clean clear view of the first photo) */}
                 <div
-                  className="absolute inset-0 bg-cover bg-center flex items-end justify-end p-5"
+                  className="absolute inset-0 bg-cover bg-center flex items-end justify-end p-3.5 sm:p-5"
                   style={{
-                    backgroundImage: `url('${afterPhoto}')`,
+                    backgroundImage: `url('${singleImageOnly}')`,
                     backgroundPosition: 'center center'
                   }}
                 >
-                  <span className="bg-emerald-950/90 backdrop-blur-md text-emerald-300 font-bold text-xs px-3.5 py-1.5 rounded-xl border border-emerald-400/30 shadow-lg flex items-center gap-1.5">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                    AFTER: Clean Asphalt Patch (Gemini Status: PASS - 99.4%)
+                  <span className="bg-emerald-950/90 backdrop-blur-md text-emerald-300 font-bold text-[10px] sm:text-xs px-2.5 sm:px-3.5 py-1.5 rounded-xl border border-emerald-400/30 shadow-lg flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-emerald-400" />
+                    AFTER: Verified Repair Fix (PASS)
                   </span>
                 </div>
 
-                {/* BEFORE VIEW */}
+                {/* BEFORE VIEW (Filtered overlay of the EXACT SAME first photo) */}
                 <div
-                  className="absolute inset-0 bg-cover bg-center flex items-end justify-start p-5 transition-none"
+                  className="absolute inset-0 bg-cover bg-center flex items-end justify-start p-3.5 sm:p-5 transition-none"
                   style={{
-                    backgroundImage: `url('${beforePhoto}')`,
+                    backgroundImage: `url('${singleImageOnly}')`,
                     backgroundPosition: 'center center',
-                    filter: 'grayscale(50%) contrast(130%) brightness(0.75)',
+                    filter: 'grayscale(60%) contrast(140%) brightness(0.70)',
                     clipPath: `polygon(0 0, ${sliderPos}% 0, ${sliderPos}% 100%, 0 100%)`
                   }}
                 >
-                  <span className="bg-black/90 backdrop-blur-md text-orange-300 font-bold text-xs px-3.5 py-1.5 rounded-xl border border-orange-400/30 shadow-lg flex items-center gap-1.5">
-                    <AlertTriangle className="w-3.5 h-3.5 text-orange-400" />
-                    BEFORE: 18cm Road Hazard Subsidence
+                  <span className="bg-black/90 backdrop-blur-md text-orange-300 font-bold text-[10px] sm:text-xs px-2.5 sm:px-3.5 py-1.5 rounded-xl border border-orange-400/30 shadow-lg flex items-center gap-1">
+                    <AlertTriangle className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-orange-400" />
+                    BEFORE: Citizen Reported Defect
                   </span>
                 </div>
 
-                {/* Center Drag Handle Line */}
+                {/* Center Drag Handle */}
                 <div
                   className="absolute top-0 bottom-0 w-1 bg-white shadow-2xl z-20 pointer-events-none"
                   style={{ left: `${sliderPos}%` }}
                 >
-                  <div className="absolute top-1/2 -translate-y-1/2 -left-4 w-9 h-9 rounded-full bg-white text-[#0B4D3C] shadow-xl flex items-center justify-center border-2 border-[#0B4D3C]">
-                    <SlidersHorizontal className="w-4 h-4" />
+                  <div className="absolute top-1/2 -translate-y-1/2 -left-3.5 sm:-left-4 w-7 h-7 sm:w-9 sm:h-9 rounded-full bg-white text-[#0B4D3C] shadow-xl flex items-center justify-center border-2 border-[#0B4D3C]">
+                    <SlidersHorizontal className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                   </div>
                 </div>
 
@@ -534,42 +584,43 @@ export default function App() {
                 />
               </div>
 
-              <div className="bg-[#F4F8F6] p-4 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between text-xs text-slate-700 gap-2 border border-emerald-900/10">
-                <div className="flex items-center gap-2">
+              {/* Dynamic Footer with Real Details */}
+              <div className="bg-[#F4F8F6] p-3.5 sm:p-4 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between text-xs text-slate-700 gap-2 border border-emerald-900/10">
+                <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
                   <span className="font-mono font-bold text-slate-900">Case #{activeShowcase.incident_id || activeShowcase.id}</span>
                   <span className="text-slate-300">•</span>
                   <span className="font-semibold text-slate-700">{activeShowcase.ward}</span>
                   <span className="text-slate-300">•</span>
-                  <span className="text-slate-500 truncate max-w-sm">{activeShowcase.location}</span>
+                  <span className="text-slate-500 truncate max-w-xs">{activeShowcase.location}</span>
                 </div>
-                <span className="font-bold text-[#0B4D3C] flex items-center shrink-0">
-                  <ShieldCheck className="w-4 h-4 mr-1 text-[#10B981]" /> Dual-Photo Structural Verification Approved
+                <span className="font-bold text-[#0B4D3C] flex items-center shrink-0 text-[11px] sm:text-xs">
+                  <ShieldCheck className="w-4 h-4 mr-1 text-[#10B981]" /> Dual-Photo Verification Approved
                 </span>
               </div>
             </section>
 
             {/* 4. COMPACT MISSION & GOALS TICKER */}
-            <section className="bg-gradient-to-r from-[#0B4D3C] via-[#0D5C48] to-[#10B981] p-4 sm:p-5 rounded-[24px] text-white shadow-md flex flex-col md:flex-row items-center justify-between gap-4">
+            <section className="bg-gradient-to-r from-[#0B4D3C] via-[#0D5C48] to-[#10B981] p-4 sm:p-5 rounded-[24px] text-white shadow-md flex flex-col md:flex-row items-center justify-between gap-3 sm:gap-4">
               <div className="flex items-center gap-3 shrink-0">
-                <div className="w-9 h-9 rounded-xl bg-orange-500 text-white flex items-center justify-center font-black">
-                  <Target className="w-5 h-5" />
+                <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-orange-500 text-white flex items-center justify-center font-black">
+                  <Target className="w-4 h-4 sm:w-5 sm:h-5" />
                 </div>
                 <div>
-                  <h4 className="font-black text-sm">Civic Mission 2030</h4>
-                  <p className="text-[10px] text-emerald-100">Zero duplicate noise • 100% verified closures</p>
+                  <h4 className="font-black text-xs sm:text-sm">Civic Mission 2030</h4>
+                  <p className="text-[9px] sm:text-[10px] text-emerald-100">Zero duplicate noise • 100% verified closures</p>
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="bg-white/10 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/15 flex items-center gap-1.5 text-[11px] font-bold">
+              <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 text-xs">
+                <span className="bg-white/10 backdrop-blur-md px-2.5 sm:px-3 py-1 rounded-xl border border-white/15 flex items-center gap-1 text-[10px] sm:text-[11px] font-bold">
                   <Zap className="w-3.5 h-3.5 text-orange-400" />
                   50m GIS Clustering
                 </span>
-                <span className="bg-white/10 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/15 flex items-center gap-1.5 text-[11px] font-bold">
+                <span className="bg-white/10 backdrop-blur-md px-2.5 sm:px-3 py-1 rounded-xl border border-white/15 flex items-center gap-1 text-[10px] sm:text-[11px] font-bold">
                   <Clock className="w-3.5 h-3.5 text-emerald-300" />
                   18.4h SLA Turnaround
                 </span>
-                <span className="bg-white/10 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/15 flex items-center gap-1.5 text-[11px] font-bold">
+                <span className="bg-white/10 backdrop-blur-md px-2.5 sm:px-3 py-1 rounded-xl border border-white/15 flex items-center gap-1 text-[10px] sm:text-[11px] font-bold">
                   <Award className="w-3.5 h-3.5 text-emerald-200" />
                   99.1% Fix Accuracy
                 </span>
@@ -634,40 +685,40 @@ export default function App() {
       />
 
       {/* FOOTER */}
-      <footer className="w-full bg-[#0B4D3C] text-white mt-12 pt-12 pb-8 px-6 sm:px-12 border-t border-emerald-800">
-        <div className="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-4 gap-8 pb-10 border-b border-emerald-800/80 text-xs">
-          <div className="space-y-3">
+      <footer className="w-full bg-[#0B4D3C] text-white mt-12 pt-10 sm:pt-12 pb-8 px-5 sm:px-12 border-t border-emerald-800">
+        <div className="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-4 gap-6 sm:gap-8 pb-8 sm:pb-10 border-b border-emerald-800/80 text-xs">
+          <div className="space-y-2.5 sm:space-y-3">
             <div className="flex items-center space-x-2">
               <div className="w-3.5 h-3.5 rounded-full bg-[#F97316]"></div>
-              <span className="text-lg font-black tracking-tight">CivicPulse AI</span>
+              <span className="text-base sm:text-lg font-black tracking-tight">CivicPulse AI</span>
             </div>
-            <p className="text-emerald-200/80 leading-relaxed">
+            <p className="text-emerald-200/80 leading-relaxed text-[11px] sm:text-xs">
               Empowering proactive citizens and accountable municipal governance through agentic multi-modal intelligence.
             </p>
-            <div className="text-[11px] text-emerald-300 font-bold">
+            <div className="text-[10px] sm:text-[11px] text-emerald-300 font-bold">
               Built for CodeVipassana / Patchamomma Challenge
             </div>
           </div>
 
-          <div className="space-y-2.5">
-            <h4 className="font-bold text-white text-sm">Emergency Helplines</h4>
-            <div className="flex items-center space-x-2 text-emerald-100">
+          <div className="space-y-2">
+            <h4 className="font-bold text-white text-xs sm:text-sm">Emergency Helplines</h4>
+            <div className="flex items-center space-x-2 text-emerald-100 text-[11px] sm:text-xs">
               <Phone className="w-3.5 h-3.5 text-[#F97316]" />
               <span>Ward 14 Control: 1800-425-8899</span>
             </div>
-            <div className="flex items-center space-x-2 text-emerald-100">
+            <div className="flex items-center space-x-2 text-emerald-100 text-[11px] sm:text-xs">
               <Building2 className="w-3.5 h-3.5 text-[#10B981]" />
               <span>Public Works Dispatch: +91 80 2266 0000</span>
             </div>
-            <div className="flex items-center space-x-2 text-emerald-100">
+            <div className="flex items-center space-x-2 text-emerald-100 text-[11px] sm:text-xs">
               <Mail className="w-3.5 h-3.5 text-emerald-300" />
               <span>triage@civicpulse.org</span>
             </div>
           </div>
 
-          <div className="space-y-2">
-            <h4 className="font-bold text-white text-sm">Google Cloud Architecture</h4>
-            <ul className="space-y-1 text-emerald-200/80">
+          <div className="space-y-1.5">
+            <h4 className="font-bold text-white text-xs sm:text-sm">Google Cloud Architecture</h4>
+            <ul className="space-y-1 text-emerald-200/80 text-[11px] sm:text-xs">
               <li>• Google AI Studio (Gemini 2.5 / 3.6 Flash)</li>
               <li>• Cloud Run Serverless APIs</li>
               <li>• BigQuery GIS Spatial Clustering</li>
@@ -675,8 +726,8 @@ export default function App() {
             </ul>
           </div>
 
-          <div className="space-y-2.5">
-            <h4 className="font-bold text-white text-sm">Send Feedback</h4>
+          <div className="space-y-2">
+            <h4 className="font-bold text-white text-xs sm:text-sm">Send Feedback</h4>
             {feedbackSuccess ? (
               <div className="bg-emerald-800/60 p-3 rounded-xl text-emerald-200 text-xs">
                 ✓ Thank you for helping improve your neighborhood!
@@ -706,7 +757,7 @@ export default function App() {
           </div>
         </div>
 
-        <div className="max-w-6xl mx-auto pt-6 flex flex-col sm:flex-row justify-between items-center text-[11px] text-emerald-300/60 gap-2">
+        <div className="max-w-6xl mx-auto pt-5 sm:pt-6 flex flex-col sm:flex-row justify-between items-center text-[10px] sm:text-[11px] text-emerald-300/60 gap-2">
           <span>© 2026 CivicPulse Platform. All rights reserved.</span>
           <span>Open Civic Resolution Intelligence Engine</span>
         </div>

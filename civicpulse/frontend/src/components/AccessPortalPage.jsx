@@ -11,7 +11,9 @@ import {
   Sparkles,
   AlertCircle,
   CheckCircle2,
-  TreePine
+  TreePine,
+  Zap,
+  KeyRound
 } from 'lucide-react';
 
 export default function AccessPortalPage({ onLoginSuccess, onNavigateHome }) {
@@ -29,6 +31,12 @@ export default function AccessPortalPage({ onLoginSuccess, onNavigateHome }) {
       is_verified_admin: false
     };
     onLoginSuccess(citizenUser);
+  };
+
+  const handleQuickJudgeFill = () => {
+    setEmail('puttasuman27@gmail.com');
+    setPassword('12345678');
+    setAuthMode('ADMIN');
   };
 
   const handleAdminSubmit = async (e) => {
@@ -58,16 +66,16 @@ export default function AccessPortalPage({ onLoginSuccess, onNavigateHome }) {
 
   return (
     <div
-      className="relative w-full rounded-[36px] overflow-hidden shadow-2xl border border-emerald-900/20 flex items-center justify-center p-6 sm:p-12 min-h-[640px] bg-cover bg-center"
+      className="relative w-full rounded-[32px] sm:rounded-[36px] overflow-hidden shadow-2xl border border-emerald-900/20 flex items-center justify-center p-4 sm:p-10 min-h-[600px] bg-cover bg-center"
       style={{
         backgroundImage: `linear-gradient(to bottom, rgba(11, 77, 60, 0.88) 0%, rgba(11, 77, 60, 0.75) 50%, rgba(6, 43, 33, 0.94) 100%), url(${heroBg})`
       }}
     >
       {/* Ambient decorative glow */}
-      <div className="absolute w-96 h-96 bg-emerald-400/20 rounded-full blur-3xl pointer-events-none"></div>
+      <div className="absolute w-80 sm:w-96 h-80 sm:h-96 bg-emerald-400/20 rounded-full blur-3xl pointer-events-none"></div>
 
       {/* Centered Glassmorphism Card */}
-      <div className="relative z-10 max-w-md w-full bg-white/95 backdrop-blur-xl rounded-[32px] p-7 sm:p-9 shadow-2xl border border-white/40 space-y-6">
+      <div className="relative z-10 max-w-md w-full bg-white/95 backdrop-blur-xl rounded-[28px] sm:rounded-[32px] p-6 sm:p-8 shadow-2xl border border-white/40 space-y-5">
         
         {/* Top Badge & Header */}
         <div className="text-center space-y-1.5">
@@ -75,12 +83,22 @@ export default function AccessPortalPage({ onLoginSuccess, onNavigateHome }) {
             <TreePine className="w-3.5 h-3.5 text-[#F97316]" /> CivicPulse Identity
           </span>
           <h2 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
-            Welcome to CivicPulse
+            Role Access Portal
           </h2>
           <p className="text-xs text-slate-500 leading-relaxed max-w-xs mx-auto">
             AI-driven resolution intelligence for citizens and municipal administrators.
           </p>
         </div>
+
+        {/* ⚡ Quick Auto-Fill for Judges / Evaluators */}
+        <button
+          type="button"
+          onClick={handleQuickJudgeFill}
+          className="w-full bg-gradient-to-r from-amber-50 to-orange-50 border border-orange-200 hover:border-orange-300 text-orange-800 p-2.5 rounded-2xl text-xs font-bold flex items-center justify-center gap-2 transition hover:shadow-sm"
+        >
+          <Zap className="w-4 h-4 text-[#F97316]" />
+          <span>⚡ 1-Click Judge Demo Credentials</span>
+        </button>
 
         {/* Role Toggle Switcher */}
         <div className="grid grid-cols-2 gap-1.5 p-1 bg-[#F4F8F6] rounded-2xl border border-slate-200">
@@ -127,7 +145,7 @@ export default function AccessPortalPage({ onLoginSuccess, onNavigateHome }) {
                 <CheckCircle2 className="w-3.5 h-3.5 text-[#10B981]" /> Public Citizen Access
               </span>
               <p className="text-[11px] leading-relaxed">
-                Snap defect photos, track 50m BigQuery incident clusters, and verify fixes in real time with zero login required.
+                Snap defect photos, voice notes, track 50m BigQuery incident clusters, and verify fixes in real time.
               </p>
             </div>
 
@@ -174,7 +192,7 @@ export default function AccessPortalPage({ onLoginSuccess, onNavigateHome }) {
             </div>
 
             <div className="bg-slate-50 border border-slate-200/80 p-2.5 rounded-xl text-[10px] text-slate-500 flex justify-between items-center">
-              <span>Demo Account: <strong className="text-slate-700">puttasuman27@gmail.com</strong></span>
+              <span>Account: <strong className="text-slate-700">Putta Suman</strong></span>
               <span className="font-mono bg-slate-200/80 px-1.5 py-0.5 rounded font-bold text-slate-800">12345678</span>
             </div>
 
@@ -198,7 +216,7 @@ export default function AccessPortalPage({ onLoginSuccess, onNavigateHome }) {
           </form>
         )}
 
-        {/* Small Notes / Micro-Pillars Footer */}
+        {/* Footer Navigation */}
         <div className="pt-3 border-t border-slate-100 text-center space-y-1">
           <p className="text-[10px] text-slate-400 font-medium">
             Powered by Gemini Multimodal Vision • BigQuery GIS • Google Cloud Run
