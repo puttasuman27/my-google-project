@@ -7,10 +7,10 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-# Sanitize broken credentials path before importing bigquery
+# Sanitize broken service account path before importing bigquery
 creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 if creds_path and not os.path.exists(creds_path):
-    logger.warning(f"Removing invalid GOOGLE_APPLICATION_CREDENTIALS={creds_path} to use Cloud Shell ADC.")
+    logger.warning(f"Unsetting invalid GOOGLE_APPLICATION_CREDENTIALS={creds_path} to use Cloud Default Credentials.")
     os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
 
 from google.cloud import bigquery
@@ -48,13 +48,44 @@ def calculate_haversine_distance(
     return 2 * earth_radius_meters * asin(sqrt(haversine))
 
 
+def evaluate_spatial_deduplication(
+    report_category: str,
+    report_lat: float,
+    report_lng: float,
+    active_incidents: Iterable[dict[str, Any]],
+    max_radius_meters: float = 50.0,
+) -> SpatialDeduplicationResult:
+    matching_incidents = []
+    for incident in active_incidents:
+        if str(incident.get("category", "")).upper().strip() != report_category.upper().strip():
+            continue
+
+        distance_meters = calculate_haversine_distance(
+            report_lat,
+            report_lng,
+            float(incident["latitude"]),
+            float(incident["longitude"]),
+        )
+        if distance_meters <= max_radius_meters:
+            matching_incidents.append((distance_meters, incident))
+
+    if not matching_incidents:
+        return SpatialDeduplicationResult(is_duplicate=False)
+
+    distance_meters, closest_incident = min(matching_incidents, key=lambda item: item[0])
+    return SpatialDeduplicationResult(
+        is_duplicate=True,
+        matched_incident_id=str(closest_incident["incident_id"]),
+        distance_meters=round(distance_meters, 2),
+    )
+
+
 class IncidentAgent:
     def __init__(self, radius_meters: float = 50.0):
         self.project_id = os.getenv("GCP_PROJECT_ID", "civicpulse-app-505811")
         self.dataset_id = os.getenv("BIGQUERY_DATASET", "civicpulse_analytics")
         self.radius_meters = float(os.getenv("INCIDENT_DEDUP_RADIUS_M", radius_meters))
-        
-        # Ensure broken credential paths do not crash BigQuery client
+
         if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ and not os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
             os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
 
@@ -62,7 +93,7 @@ class IncidentAgent:
             self.client = bigquery.Client(project=self.project_id)
             logger.info("BigQuery Client initialized for IncidentAgent.")
         except Exception as e:
-            logger.warning(f"BigQuery Client init fallback: {e}")
+            logger.warning(f"BigQuery Client init fallback (offline mode): {e}")
             self.client = None
 
     @staticmethod
@@ -82,6 +113,32 @@ class IncidentAgent:
         )
         return round(min(priority, 1.0), 3)
 
+    def resolve_ward_gis(self, lat: float, lng: float) -> str:
+        """Performs spatial point-in-polygon lookup in BigQuery GIS against municipal ward boundaries."""
+        if not self.client:
+            return "Ward 14 - Central Core"
+
+        query = f"""
+            SELECT ward_name 
+            FROM `{self.project_id}.{self.dataset_id}.ward_boundaries`
+            WHERE ST_WITHIN(ST_GEOGPOINT(@lng, @lat), boundary_geom)
+            LIMIT 1
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("lng", "FLOAT64", lng),
+                bigquery.ScalarQueryParameter("lat", "FLOAT64", lat),
+            ]
+        )
+        try:
+            rows = list(self.client.query(query, job_config=job_config).result())
+            if rows:
+                return str(rows[0]["ward_name"])
+        except Exception as e:
+            logger.warning(f"GIS ward lookup fallback: {e}")
+
+        return "Ward 14 - Central Core"
+
     def process_and_cluster(
         self,
         vision_result,
@@ -96,7 +153,6 @@ class IncidentAgent:
         table_ref = f"`{self.project_id}.{self.dataset_id}.incidents`"
 
         if not self.client:
-            # Fallback if offline
             new_id = f"INC-{str(uuid.uuid4())[:8].upper()}"
             initial_prio = self.calculate_priority(severity, 1, road_class)
             return IncidentClusteringResult(
@@ -107,7 +163,7 @@ class IncidentAgent:
                 explanation="Local incident cluster created (BigQuery offline mode)."
             )
 
-        # 1. BigQuery GIS Spatial Deduplication (50m proximity)
+        # 1. BigQuery GIS Spatial Deduplication Query (50m radius, non-resolved status)
         query = f"""
             SELECT 
                 incident_id,
@@ -119,7 +175,7 @@ class IncidentAgent:
                 ) AS distance_m
             FROM {table_ref}
             WHERE UPPER(TRIM(category)) = @category
-              AND (UPPER(status) != 'RESOLVED' OR status IS NULL)
+              AND (UPPER(TRIM(status)) != 'RESOLVED' OR status IS NULL)
               AND ST_DWITHIN(
                   COALESCE(location, ST_GEOGPOINT(longitude, latitude)),
                   ST_GEOGPOINT(@lng, @lat),
@@ -140,7 +196,7 @@ class IncidentAgent:
         try:
             rows = list(self.client.query(query, job_config=job_config).result())
         except Exception as e:
-            logger.warning(f"Spatial query fallback: {e}")
+            logger.warning(f"Spatial GIS query notice: {e}")
             rows = []
 
         # 2. MATCH FOUND -> MERGE DUPLICATE
@@ -178,10 +234,10 @@ class IncidentAgent:
                 explanation=f"Spatial cluster merged: Defect located {round(match['distance_m'], 1)}m from Canonical ID {canonical_id}."
             )
 
-        # 3. NO MATCH -> INSERT NEW CANONICAL INCIDENT
+        # 3. NO MATCH -> INSERT NEW CANONICAL INCIDENT WITH GIS POINT & WARD POLYGON
         new_id = f"INC-{str(uuid.uuid4())[:8].upper()}"
         initial_prio = self.calculate_priority(severity, 1, road_class)
-        ward_id = f"Ward-{int((lat % 1) * 100):02d}"
+        ward_name = self.resolve_ward_gis(lat, lng)
 
         insert_query = f"""
             INSERT INTO {table_ref} (
@@ -203,7 +259,7 @@ class IncidentAgent:
                 bigquery.ScalarQueryParameter("lng", "FLOAT64", lng),
                 bigquery.ScalarQueryParameter("sev", "FLOAT64", severity),
                 bigquery.ScalarQueryParameter("prio", "FLOAT64", initial_prio),
-                bigquery.ScalarQueryParameter("ward", "STRING", ward_id),
+                bigquery.ScalarQueryParameter("ward", "STRING", ward_name),
                 bigquery.ScalarQueryParameter("image_url", "STRING", image_url),
             ]
         )
@@ -219,3 +275,12 @@ class IncidentAgent:
             updated_priority_score=initial_prio,
             explanation="New canonical incident created with GIS point partition."
         )
+
+
+__all__ = [
+    "IncidentAgent",
+    "IncidentClusteringResult",
+    "SpatialDeduplicationResult",
+    "calculate_haversine_distance",
+    "evaluate_spatial_deduplication",
+]

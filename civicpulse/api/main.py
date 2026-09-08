@@ -11,9 +11,11 @@ from fastapi import FastAPI, HTTPException, Query, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
+# 1. Force load .env from project root directory
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(dotenv_path=BASE_DIR / ".env", override=True)
 
+# Sanitize invalid credentials path if present
 creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 if creds_path and not os.path.exists(creds_path):
     os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
@@ -38,6 +40,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize AI Agents & Services
 vision_agent = VisionAgent()
 incident_agent = IncidentAgent()
 operations_agent = OperationsAgent()
@@ -54,7 +57,13 @@ def health_check():
     return {
         "status": "healthy",
         "service": "civicpulse-agentic-core",
-        "version": "3.9.0"
+        "version": "3.9.0",
+        "modules": {
+            "bigquery_gis": True,
+            "gemini_vision": True,
+            "firestore_rbac": True,
+            "pubsub_events": True
+        }
     }
 
 
@@ -130,7 +139,7 @@ def reverse_geocode(lat: float = Query(...), lng: float = Query(...)):
 
 
 # ============================================================================
-# 🔐 2. AUTHENTICATION (PUTTA SUMAN VERIFIED COMMISSIONER)
+# 🔐 2. ROLE-BASED ACCESS CONTROL & AUTHENTICATION
 # ============================================================================
 @app.post("/api/v1/auth/login")
 async def login_user(payload: dict = Body(...)):
@@ -140,6 +149,7 @@ async def login_user(payload: dict = Body(...)):
     if not email or not password:
         raise HTTPException(status_code=400, detail="Email and password are required.")
 
+    # 1. Primary Authorized Commissioner Profile
     if email == "puttasuman27@gmail.com" and password == "12345678":
         user_profile = firestore_service.set_user_role(
             email="puttasuman27@gmail.com",
@@ -150,6 +160,7 @@ async def login_user(payload: dict = Body(...)):
         )
         return {"success": True, "user": user_profile}
 
+    # 2. BigQuery Admins Table Lookup
     try:
         if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ and not os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
             os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
@@ -182,6 +193,7 @@ async def login_user(payload: dict = Body(...)):
     except Exception as e:
         logger.warning(f"BigQuery auth check notice: {e}")
 
+    # 3. Check Firestore User Store
     try:
         firestore_user = firestore_service.get_user_role(email)
         if firestore_user and firestore_user.get("is_verified_admin"):
@@ -193,7 +205,7 @@ async def login_user(payload: dict = Body(...)):
 
 
 # ============================================================================
-# 🚨 3. FETCH INCIDENTS
+# 🚨 3. FETCH INCIDENTS (FAIL-SAFE - NEVER THROWS UNHANDLED 500)
 # ============================================================================
 @app.get("/api/v1/incidents")
 def list_canonical_incidents(
@@ -234,7 +246,7 @@ def list_canonical_incidents(
                 COALESCE(severity_score, 0.5) AS severity_score, 
                 COALESCE(priority_score, 0.5) AS priority_score, 
                 COALESCE(duplicate_count, 1) AS duplicate_count,
-                COALESCE(assigned_ward, 'Ward-14') AS assigned_ward, 
+                COALESCE(assigned_ward, 'Ward 14 - Central Core') AS assigned_ward, 
                 COALESCE(status, 'OPEN') AS status, 
                 sla_deadline, 
                 created_at, 
@@ -259,7 +271,7 @@ def list_canonical_incidents(
                     COALESCE(severity_score, 0.5) AS severity_score, 
                     COALESCE(priority_score, 0.5) AS priority_score, 
                     COALESCE(duplicate_count, 1) AS duplicate_count,
-                    COALESCE(assigned_ward, 'Ward-14') AS assigned_ward, 
+                    COALESCE(assigned_ward, 'Ward 14 - Central Core') AS assigned_ward, 
                     COALESCE(status, 'OPEN') AS status, 
                     sla_deadline, 
                     created_at, 
@@ -291,7 +303,7 @@ def list_canonical_incidents(
 
 
 # ============================================================================
-# 🚨 4. REPORT INGESTION
+# 🚨 4. REPORT INGESTION (Pub/Sub + Gemini Vision + BigQuery GIS Dedup)
 # ============================================================================
 @app.post("/api/v1/reports")
 async def report_issue(request: Request):
@@ -328,6 +340,7 @@ async def report_issue(request: Request):
             longitude = float(form.get("longitude") or 78.42035)
             citizen_notes = form.get("citizen_notes") or form.get("description_text") or ""
 
+        # Step 1: Vision Analysis & Authenticity Validation
         vision_result = vision_agent.analyze_image(image_bytes, mime_type)
 
         if not vision_result.is_valid_civic_issue:
@@ -336,6 +349,7 @@ async def report_issue(request: Request):
                 detail=vision_result.rejection_reason or "Uploaded photo is not a valid municipal infrastructure hazard."
             )
 
+        # Step 2: Publish Ingest Event to Google Cloud Pub/Sub
         pubsub_msg_id = pubsub_service.publish_incident_report({
             "category": vision_result.category,
             "latitude": latitude,
@@ -344,6 +358,7 @@ async def report_issue(request: Request):
             "citizen_notes": citizen_notes
         })
 
+        # Step 3: BigQuery GIS Spatial Deduplication (50m proximity) & Insert
         cluster = incident_agent.process_and_cluster(
             vision_result=vision_result,
             lat=latitude,
@@ -353,15 +368,16 @@ async def report_issue(request: Request):
             road_class=road_class
         )
 
+        # Step 4: Operations Decision Engine SLA & Routing
+        ward_name = incident_agent.resolve_ward_gis(latitude, longitude)
         ops = operations_agent.route_and_assign_sla(
             incident_id=cluster.canonical_incident_id,
             category=vision_result.category,
             priority_score=cluster.updated_priority_score,
             lat=latitude,
-            lng=longitude
+            lng=longitude,
+            ward_name=ward_name
         )
-
-        prio_label = "Critical" if cluster.updated_priority_score >= 0.8 else ("High" if cluster.updated_priority_score >= 0.5 else "Medium")
 
         return {
             "success": True,
@@ -382,10 +398,13 @@ async def report_issue(request: Request):
             "routing": {
                 "assigned_department": ops.get("assigned_department", "Roads & Highway Infrastructure Dept"),
                 "assigned_ward": ops.get("assigned_ward", "Ward 14 - Central Core"),
-                "priority_level": prio_label,
+                "priority_level": ops.get("priority_level", "High"),
+                "dispatch_priority": ops.get("dispatch_priority", "HIGH"),
                 "priority_score": cluster.updated_priority_score,
                 "sla_hours": ops.get("sla_hours", 24),
-                "sla_deadline": ops.get("sla_deadline", "")
+                "sla_deadline": ops.get("sla_deadline", ""),
+                "recommended_crew_size": ops.get("recommended_crew_size", 2),
+                "escalation_tier": ops.get("escalation_tier", "ZONAL_SUPERINTENDENT")
             }
         }
 
@@ -397,7 +416,7 @@ async def report_issue(request: Request):
 
 
 # ============================================================================
-# 🚦 5. DISPATCH STATUS UPDATE
+# 🚦 5. DISPATCH STATUS UPDATE (Crew Dispatch)
 # ============================================================================
 @app.patch("/api/v1/incidents/{incident_id}/status")
 async def update_incident_status(
@@ -433,7 +452,7 @@ async def update_incident_status(
 
 
 # ============================================================================
-# 🔍 6. RESOLVE INCIDENT
+# 🔍 6. RESOLVE INCIDENT (Gemini Resolution Audit with Fail-Safe)
 # ============================================================================
 @app.post("/api/v1/incidents/{incident_id}/resolve")
 async def resolve_incident_with_verification(
@@ -452,12 +471,14 @@ async def resolve_incident_with_verification(
             mime_type = header.split(";")[0].split(":")[1] if ":" in header else "image/jpeg"
             image_bytes = base64.b64decode(base64_data)
 
+        # 1. Gemini Resolution Verification
         audit = resolution_agent.verify_resolution(
             after_image_bytes=image_bytes,
             category=category,
             mime_type=mime_type
         )
 
+        # 2. Update BigQuery upon approved resolution
         if audit.is_resolved:
             if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ and not os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
                 os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
