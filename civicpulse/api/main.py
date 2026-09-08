@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
+# 1. Force load .env from project root directory
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(dotenv_path=BASE_DIR / ".env", override=True)
 
@@ -29,9 +30,9 @@ from services.pubsub_service import PubSubService
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CivicPulse Core API", version="4.0.0")
+app = FastAPI(title="CivicPulse Core API", version="4.1.0")
 
-# 🔒 Strict CORS Configuration
+# 🔒 Configurable CORS Allowed Origins
 allowed_origins_env = os.getenv(
     "ALLOWED_ORIGINS",
     "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,https://civicpulse-app-505811.web.app,https://civicpulse-app-505811.firebaseapp.com"
@@ -40,7 +41,7 @@ allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") i
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=allowed_origins if allowed_origins else ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -63,7 +64,7 @@ def health_check():
     return {
         "status": "healthy",
         "service": "civicpulse-agentic-core",
-        "version": "4.0.0",
+        "version": "4.1.0",
         "dataset": BQ_DATASET
     }
 
@@ -78,7 +79,7 @@ def geocode_search(query: str = Query(..., min_length=2)):
         url = f"https://nominatim.openstreetmap.org/search?q={encoded_q}&format=json&limit=5&addressdetails=1"
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "CivicPulse-Municipal-AI/4.0 (contact: info@civicpulse.org)"}
+            headers={"User-Agent": "CivicPulse-Municipal-AI/4.1 (contact: info@civicpulse.org)"}
         )
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
@@ -114,7 +115,7 @@ def reverse_geocode(lat: float = Query(...), lng: float = Query(...)):
         url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lng}&format=json"
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "CivicPulse-Municipal-AI/4.0 (contact: info@civicpulse.org)"}
+            headers={"User-Agent": "CivicPulse-Municipal-AI/4.1 (contact: info@civicpulse.org)"}
         )
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
@@ -140,7 +141,7 @@ def reverse_geocode(lat: float = Query(...), lng: float = Query(...)):
 
 
 # ============================================================================
-# 🔐 2. SECURE AUTHENTICATION (NO HARDCODED PASSWORDS IN SOURCE)
+# 🔐 2. SECURE AUTHENTICATION
 # ============================================================================
 @app.post("/api/v1/auth/login")
 async def login_user(payload: dict = Body(...)):
@@ -150,11 +151,11 @@ async def login_user(payload: dict = Body(...)):
     if not email or not password:
         raise HTTPException(status_code=400, detail="Email and password are required.")
 
-    # 1. Configurable Environment Demo Credentials (Securely loaded from .env)
+    # 1. Configurable Demo Commissioner Credentials
     demo_admin_email = os.getenv("DEMO_ADMIN_EMAIL", "puttasuman27@gmail.com").strip().lower()
-    demo_admin_password = os.getenv("DEMO_ADMIN_PASSWORD", "12345678").strip()
+    demo_admin_pass = os.getenv("DEMO_ADMIN_PASSWORD", "12345678").strip()
 
-    if email == demo_admin_email and password == demo_admin_password:
+    if email == demo_admin_email and password == demo_admin_pass:
         user_profile = firestore_service.set_user_role(
             email=email,
             name=os.getenv("DEMO_ADMIN_NAME", "Putta Suman"),
@@ -195,7 +196,7 @@ async def login_user(payload: dict = Body(...)):
             )
             return {"success": True, "user": synced_profile}
     except Exception as e:
-        logger.warning(f"BigQuery auth check notice: {e}")
+        logger.warning(f"BigQuery auth notice: {e}")
 
     # 3. Check Firestore User Store
     try:
@@ -203,7 +204,7 @@ async def login_user(payload: dict = Body(...)):
         if firestore_user and firestore_user.get("is_verified_admin"):
             return {"success": True, "user": firestore_user}
     except Exception as e:
-        logger.warning(f"Firestore role check notice: {e}")
+        logger.warning(f"Firestore role notice: {e}")
 
     raise HTTPException(status_code=401, detail="Invalid government email or password credentials.")
 
