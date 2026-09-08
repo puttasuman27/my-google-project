@@ -1,79 +1,125 @@
 import os
+import sys
+import logging
 from google.cloud import bigquery
-from dotenv import load_dotenv
 
-load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("setup_bigquery")
 
-PROJECT_ID = os.getenv("GCP_PROJECT_ID")
-DATASET_ID = os.getenv("BIGQUERY_DATASET", "civicpulse_data")
+PROJECT_ID = os.getenv("GCP_PROJECT_ID", "civicpulse-app-505811")
+DATASET_ID = os.getenv("BIGQUERY_DATASET", "civicpulse_analytics")
 
-def init_bigquery():
+
+def setup_canonical_bigquery_tables():
+    if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ and not os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
+        os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+
     client = bigquery.Client(project=PROJECT_ID)
-    dataset_ref = f"{PROJECT_ID}.{DATASET_ID}"
-    
-    # 1. Create Dataset if not exists
+
+    # 1. Ensure Dataset Exists (US Multi-region)
+    dataset_ref = bigquery.DatasetReference(PROJECT_ID, DATASET_ID)
     dataset = bigquery.Dataset(dataset_ref)
     dataset.location = "US"
-    dataset = client.create_dataset(dataset, exists_ok=True)
-    print(f"[OK] Dataset {dataset_ref} verified/created.")
+    try:
+        client.create_dataset(dataset, exists_ok=True)
+        logger.info(f"✅ BigQuery Dataset verified: `{PROJECT_ID}.{DATASET_ID}`")
+    except Exception as e:
+        logger.info(f"Dataset verification notice: {e}")
 
-    # 2. Canonical Incidents Table
-    incidents_table_id = f"{dataset_ref}.incidents"
+    # 2. Schema: Incidents Table (Canonical Comprehensive Spec)
+    incidents_table_id = f"{PROJECT_ID}.{DATASET_ID}.incidents"
     incidents_schema = [
         bigquery.SchemaField("incident_id", "STRING", mode="REQUIRED"),
         bigquery.SchemaField("category", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("status", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("priority_score", "FLOAT64", mode="REQUIRED"),
-        bigquery.SchemaField("severity_score", "FLOAT64", mode="REQUIRED"),
-        bigquery.SchemaField("report_count", "INT64", mode="REQUIRED"),
-        bigquery.SchemaField("road_class", "STRING", mode="NULLABLE"),
         bigquery.SchemaField("hazard_type", "STRING", mode="NULLABLE"),
-        bigquery.SchemaField("location", "GEOGRAPHY", mode="REQUIRED"),
+        bigquery.SchemaField("road_class", "STRING", mode="NULLABLE"),
         bigquery.SchemaField("latitude", "FLOAT64", mode="REQUIRED"),
         bigquery.SchemaField("longitude", "FLOAT64", mode="REQUIRED"),
-        bigquery.SchemaField("primary_image_url", "STRING", mode="NULLABLE"),
-        bigquery.SchemaField("assigned_ward", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("location", "GEOGRAPHY", mode="NULLABLE"),
+        bigquery.SchemaField("severity_score", "FLOAT64", mode="NULLABLE"),
+        bigquery.SchemaField("priority_score", "FLOAT64", mode="NULLABLE"),
+        bigquery.SchemaField("duplicate_count", "INT64", mode="NULLABLE"),
         bigquery.SchemaField("assigned_department", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("assigned_ward", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("status", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("intake_image_url", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("resolved_image_url", "STRING", mode="NULLABLE"),
         bigquery.SchemaField("sla_deadline", "TIMESTAMP", mode="NULLABLE"),
-        bigquery.SchemaField("created_at", "TIMESTAMP", mode="REQUIRED"),
-        bigquery.SchemaField("updated_at", "TIMESTAMP", mode="REQUIRED"),
+        bigquery.SchemaField("created_at", "TIMESTAMP", mode="NULLABLE"),
+        bigquery.SchemaField("updated_at", "TIMESTAMP", mode="NULLABLE"),
     ]
     incidents_table = bigquery.Table(incidents_table_id, schema=incidents_schema)
     client.create_table(incidents_table, exists_ok=True)
-    print(f"[OK] Table {incidents_table_id} verified/created.")
+    logger.info(f"✅ Incidents table verified: `{incidents_table_id}`")
 
-    # 3. Raw Citizen Submissions Table (Evidence Trail)
-    submissions_table_id = f"{dataset_ref}.raw_submissions"
-    submissions_schema = [
-        bigquery.SchemaField("submission_id", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("canonical_incident_id", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("citizen_notes", "STRING", mode="NULLABLE"),
-        bigquery.SchemaField("image_url", "STRING", mode="NULLABLE"),
-        bigquery.SchemaField("location", "GEOGRAPHY", mode="REQUIRED"),
-        bigquery.SchemaField("latitude", "FLOAT64", mode="REQUIRED"),
-        bigquery.SchemaField("longitude", "FLOAT64", mode="REQUIRED"),
-        bigquery.SchemaField("submitted_at", "TIMESTAMP", mode="REQUIRED"),
+    # 3. Schema: Ward Boundaries GIS Table
+    ward_table_id = f"{PROJECT_ID}.{DATASET_ID}.ward_boundaries"
+    ward_schema = [
+        bigquery.SchemaField("ward_id", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("ward_name", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("zone_name", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("boundary_geom", "GEOGRAPHY", mode="REQUIRED"),
     ]
-    submissions_table = bigquery.Table(submissions_table_id, schema=submissions_schema)
-    client.create_table(submissions_table, exists_ok=True)
-    print(f"[OK] Table {submissions_table_id} verified/created.")
+    ward_table = bigquery.Table(ward_table_id, schema=ward_schema)
+    client.create_table(ward_table, exists_ok=True)
+    logger.info(f"✅ Ward boundaries table verified: `{ward_table_id}`")
 
-    # 4. Contractor Resolution Verifications Table
-    verifications_table_id = f"{dataset_ref}.resolution_verifications"
-    verifications_schema = [
-        bigquery.SchemaField("verification_id", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("canonical_incident_id", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("contractor_id", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("verdict", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("confidence_score", "FLOAT64", mode="REQUIRED"),
-        bigquery.SchemaField("reasoning", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("before_image_url", "STRING", mode="NULLABLE"),
-        bigquery.SchemaField("after_image_url", "STRING", mode="NULLABLE"),
-        bigquery.SchemaField("verified_at", "TIMESTAMP", mode="REQUIRED"),
+    # 4. Schema: Admins Table
+    admins_table_id = f"{PROJECT_ID}.{DATASET_ID}.admins"
+    admins_schema = [
+        bigquery.SchemaField("admin_id", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("name", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("email", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("password_hash", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("role", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("assigned_ward", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("designation", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("created_at", "TIMESTAMP", mode="NULLABLE"),
     ]
-    verifications_table = bigquery.Table(verifications_table_id, schema=verifications_schema)
-    client.create_table(verifications_table, exists_ok=True)
-    print(f"[OK] Table {verifications_table_id} verified/created.")
+    admins_table = bigquery.Table(admins_table_id, schema=admins_schema)
+    client.create_table(admins_table, exists_ok=True)
+    logger.info(f"✅ Admins table verified: `{admins_table_id}`")
+
+    # 5. Seed Municipal Ward Polygons
+    seed_wards_sql = f"""
+        DELETE FROM `{ward_table_id}` WHERE 1=1;
+        INSERT INTO `{ward_table_id}` (ward_id, ward_name, zone_name, boundary_geom)
+        VALUES
+        (
+            "WARD-14", "Ward 14 - Central Core", "Central Zone",
+            ST_GEOGFROMTEXT('POLYGON((78.410 17.485, 78.435 17.485, 78.435 17.505, 78.410 17.505, 78.410 17.485))')
+        ),
+        (
+            "WARD-49", "Ward 49 - West District", "West Zone",
+            ST_GEOGFROMTEXT('POLYGON((78.435 17.485, 78.460 17.485, 78.460 17.505, 78.435 17.505, 78.435 17.485))')
+        ),
+        (
+            "WARD-94", "Ward 94 - North Commercial", "North Zone",
+            ST_GEOGFROMTEXT('POLYGON((78.410 17.505, 78.460 17.505, 78.460 17.530, 78.410 17.530, 78.410 17.505))')
+        );
+    """
+    client.query(seed_wards_sql).result()
+    logger.info("✅ Municipal Ward GIS Polygons seeded.")
+
+    # 6. Seed Default Administrator Profile
+    seed_admin_sql = f"""
+        DELETE FROM `{admins_table_id}` WHERE email = "puttasuman27@gmail.com";
+        INSERT INTO `{admins_table_id}` 
+        (admin_id, name, email, password_hash, role, assigned_ward, designation, created_at)
+        VALUES (
+            "ADM-001",
+            "Putta Suman",
+            "puttasuman27@gmail.com",
+            "12345678",
+            "MUNICIPAL_COMMISSIONER",
+            "ALL",
+            "Chief Municipal Operations Commissioner",
+            CURRENT_TIMESTAMP()
+        );
+    """
+    client.query(seed_admin_sql).result()
+    logger.info("✅ Default Administrator profile seeded.")
+
 
 if __name__ == "__main__":
-    init_bigquery()
+    setup_canonical_bigquery_tables()

@@ -1,14 +1,17 @@
--- Standardized Dataset: civicpulse_analytics
+-- Canonical BigQuery Schema: civicpulse_analytics
 
 CREATE TABLE IF NOT EXISTS `civicpulse_analytics.incidents` (
     incident_id STRING NOT NULL,
     category STRING NOT NULL,
+    hazard_type STRING,
+    road_class STRING,
     latitude FLOAT64 NOT NULL,
     longitude FLOAT64 NOT NULL,
     location GEOGRAPHY,
     severity_score FLOAT64,
     priority_score FLOAT64,
     duplicate_count INT64,
+    assigned_department STRING,
     assigned_ward STRING,
     status STRING,
     intake_image_url STRING,
