@@ -1,5 +1,6 @@
 import os
 import sys
+import hashlib
 import logging
 from google.cloud import bigquery
 
@@ -10,13 +11,18 @@ PROJECT_ID = os.getenv("GCP_PROJECT_ID", "civicpulse-app-505811")
 DATASET_ID = os.getenv("BIGQUERY_DATASET", "civicpulse_analytics")
 
 
+def hash_password(password: str) -> str:
+    """Computes SHA-256 cryptographic hash for secure database storage."""
+    return hashlib.sha256(password.strip().encode("utf-8")).hexdigest()
+
+
 def setup_canonical_bigquery_tables():
     if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ and not os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
         os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
 
     client = bigquery.Client(project=PROJECT_ID)
 
-    # 1. Ensure Dataset Exists (US Multi-region)
+    # 1. Dataset Verification
     dataset_ref = bigquery.DatasetReference(PROJECT_ID, DATASET_ID)
     dataset = bigquery.Dataset(dataset_ref)
     dataset.location = "US"
@@ -24,9 +30,9 @@ def setup_canonical_bigquery_tables():
         client.create_dataset(dataset, exists_ok=True)
         logger.info(f"✅ BigQuery Dataset verified: `{PROJECT_ID}.{DATASET_ID}`")
     except Exception as e:
-        logger.info(f"Dataset verification notice: {e}")
+        logger.info(f"Dataset notice: {e}")
 
-    # 2. Schema: Incidents Table (Canonical Comprehensive Spec)
+    # 2. Incidents Table Schema
     incidents_table_id = f"{PROJECT_ID}.{DATASET_ID}.incidents"
     incidents_schema = [
         bigquery.SchemaField("incident_id", "STRING", mode="REQUIRED"),
@@ -52,7 +58,7 @@ def setup_canonical_bigquery_tables():
     client.create_table(incidents_table, exists_ok=True)
     logger.info(f"✅ Incidents table verified: `{incidents_table_id}`")
 
-    # 3. Schema: Ward Boundaries GIS Table
+    # 3. Ward Boundaries Schema
     ward_table_id = f"{PROJECT_ID}.{DATASET_ID}.ward_boundaries"
     ward_schema = [
         bigquery.SchemaField("ward_id", "STRING", mode="REQUIRED"),
@@ -64,7 +70,7 @@ def setup_canonical_bigquery_tables():
     client.create_table(ward_table, exists_ok=True)
     logger.info(f"✅ Ward boundaries table verified: `{ward_table_id}`")
 
-    # 4. Schema: Admins Table
+    # 4. Admins Table Schema
     admins_table_id = f"{PROJECT_ID}.{DATASET_ID}.admins"
     admins_schema = [
         bigquery.SchemaField("admin_id", "STRING", mode="REQUIRED"),
@@ -80,7 +86,7 @@ def setup_canonical_bigquery_tables():
     client.create_table(admins_table, exists_ok=True)
     logger.info(f"✅ Admins table verified: `{admins_table_id}`")
 
-    # 5. Seed Municipal Ward Polygons
+    # 5. Seed Municipal Ward GIS Polygons
     seed_wards_sql = f"""
         DELETE FROM `{ward_table_id}` WHERE 1=1;
         INSERT INTO `{ward_table_id}` (ward_id, ward_name, zone_name, boundary_geom)
@@ -101,24 +107,38 @@ def setup_canonical_bigquery_tables():
     client.query(seed_wards_sql).result()
     logger.info("✅ Municipal Ward GIS Polygons seeded.")
 
-    # 6. Seed Default Administrator Profile
+    # 6. Seed Administrator Profiles using Cryptographic SHA-256 Hashes
+    admin_pass = os.getenv("DEMO_ADMIN_PASSWORD", "putta_admin_2026")
+    admin_hash = hash_password(admin_pass)
+
     seed_admin_sql = f"""
-        DELETE FROM `{admins_table_id}` WHERE email = "puttasuman27@gmail.com";
+        DELETE FROM `{admins_table_id}` WHERE email IN ("puttasuman27@gmail.com", "ananya.ward14@civicpulse.org");
         INSERT INTO `{admins_table_id}` 
         (admin_id, name, email, password_hash, role, assigned_ward, designation, created_at)
-        VALUES (
+        VALUES 
+        (
             "ADM-001",
             "Putta Suman",
             "puttasuman27@gmail.com",
-            "12345678",
+            "{admin_hash}",
             "MUNICIPAL_COMMISSIONER",
             "ALL",
             "Chief Municipal Operations Commissioner",
             CURRENT_TIMESTAMP()
+        ),
+        (
+            "ADM-002",
+            "Ananya Sharma",
+            "ananya.ward14@civicpulse.org",
+            "{admin_hash}",
+            "WARD_OFFICER",
+            "Ward 14 - Central Core",
+            "Ward 14 Zonal Superintendent",
+            CURRENT_TIMESTAMP()
         );
     """
     client.query(seed_admin_sql).result()
-    logger.info("✅ Default Administrator profile seeded.")
+    logger.info("✅ Administrator profiles securely seeded with cryptographic SHA-256 hashes.")
 
 
 if __name__ == "__main__":

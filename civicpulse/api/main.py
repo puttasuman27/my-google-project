@@ -5,6 +5,7 @@ import urllib.request
 import urllib.parse
 import json
 import logging
+import hashlib
 from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Query, Request, Body
@@ -30,7 +31,7 @@ from services.pubsub_service import PubSubService
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CivicPulse Core API", version="4.1.0")
+app = FastAPI(title="CivicPulse Core API", version="4.2.0")
 
 # 🔒 Configurable CORS Allowed Origins
 allowed_origins_env = os.getenv(
@@ -59,12 +60,17 @@ GCP_PROJECT = os.getenv("GCP_PROJECT_ID", "civicpulse-app-505811")
 BQ_DATASET = os.getenv("BIGQUERY_DATASET", "civicpulse_analytics")
 
 
+def compute_password_hash(raw_password: str) -> str:
+    """Computes SHA-256 cryptographic hash for secure verification."""
+    return hashlib.sha256(raw_password.strip().encode("utf-8")).hexdigest()
+
+
 @app.get("/health")
 def health_check():
     return {
         "status": "healthy",
         "service": "civicpulse-agentic-core",
-        "version": "4.1.0",
+        "version": "4.2.0",
         "dataset": BQ_DATASET
     }
 
@@ -79,7 +85,7 @@ def geocode_search(query: str = Query(..., min_length=2)):
         url = f"https://nominatim.openstreetmap.org/search?q={encoded_q}&format=json&limit=5&addressdetails=1"
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "CivicPulse-Municipal-AI/4.1 (contact: info@civicpulse.org)"}
+            headers={"User-Agent": "CivicPulse-Municipal-AI/4.2 (contact: info@civicpulse.org)"}
         )
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
@@ -115,7 +121,7 @@ def reverse_geocode(lat: float = Query(...), lng: float = Query(...)):
         url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lng}&format=json"
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "CivicPulse-Municipal-AI/4.1 (contact: info@civicpulse.org)"}
+            headers={"User-Agent": "CivicPulse-Municipal-AI/4.2 (contact: info@civicpulse.org)"}
         )
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
@@ -141,31 +147,35 @@ def reverse_geocode(lat: float = Query(...), lng: float = Query(...)):
 
 
 # ============================================================================
-# 🔐 2. SECURE AUTHENTICATION
+# 🔐 2. SECURE AUTHENTICATION (NO HARDCODED PASSWORD LITERALS)
 # ============================================================================
 @app.post("/api/v1/auth/login")
 async def login_user(payload: dict = Body(...)):
     email = str(payload.get("email", "")).strip().lower()
-    password = str(payload.get("password", "")).strip()
+    raw_password = str(payload.get("password", "")).strip()
 
-    if not email or not password:
+    if not email or not raw_password:
         raise HTTPException(status_code=400, detail="Email and password are required.")
 
-    # 1. Configurable Demo Commissioner Credentials
-    demo_admin_email = os.getenv("DEMO_ADMIN_EMAIL", "puttasuman27@gmail.com").strip().lower()
-    demo_admin_pass = os.getenv("DEMO_ADMIN_PASSWORD", "12345678").strip()
+    input_hash = compute_password_hash(raw_password)
 
-    if email == demo_admin_email and password == demo_admin_pass:
-        user_profile = firestore_service.set_user_role(
-            email=email,
-            name=os.getenv("DEMO_ADMIN_NAME", "Putta Suman"),
-            role="MUNICIPAL_COMMISSIONER",
-            assigned_ward="ALL",
-            designation="Chief Municipal Operations Commissioner"
-        )
-        return {"success": True, "user": user_profile}
+    # 1. Check Configured Environment Demo Commissioner (No Hardcoded Fallbacks)
+    demo_admin_email = (os.getenv("DEMO_ADMIN_EMAIL") or "").strip().lower()
+    demo_admin_pass = (os.getenv("DEMO_ADMIN_PASSWORD") or "").strip()
 
-    # 2. BigQuery Admins Table Lookup
+    if demo_admin_email and demo_admin_pass:
+        demo_hash = compute_password_hash(demo_admin_pass)
+        if email == demo_admin_email and input_hash == demo_hash:
+            user_profile = firestore_service.set_user_role(
+                email=email,
+                name=os.getenv("DEMO_ADMIN_NAME", "Putta Suman"),
+                role="MUNICIPAL_COMMISSIONER",
+                assigned_ward="ALL",
+                designation="Chief Municipal Operations Commissioner"
+            )
+            return {"success": True, "user": user_profile}
+
+    # 2. BigQuery Admins Table Verification (Cryptographic SHA-256 Hash Matching)
     try:
         if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ and not os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
             os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
@@ -174,13 +184,13 @@ async def login_user(payload: dict = Body(...)):
         query = f"""
             SELECT admin_id, name, email, role, assigned_ward, designation
             FROM `{GCP_PROJECT}.{BQ_DATASET}.admins`
-            WHERE LOWER(email) = @email AND password_hash = @password
+            WHERE LOWER(email) = @email AND password_hash = @input_hash
             LIMIT 1
         """
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("email", "STRING", email),
-                bigquery.ScalarQueryParameter("password", "STRING", password),
+                bigquery.ScalarQueryParameter("input_hash", "STRING", input_hash),
             ]
         )
         rows = list(client.query(query, job_config=job_config).result())
@@ -196,7 +206,7 @@ async def login_user(payload: dict = Body(...)):
             )
             return {"success": True, "user": synced_profile}
     except Exception as e:
-        logger.warning(f"BigQuery auth notice: {e}")
+        logger.warning(f"BigQuery auth check notice: {e}")
 
     # 3. Check Firestore User Store
     try:
@@ -204,7 +214,7 @@ async def login_user(payload: dict = Body(...)):
         if firestore_user and firestore_user.get("is_verified_admin"):
             return {"success": True, "user": firestore_user}
     except Exception as e:
-        logger.warning(f"Firestore role notice: {e}")
+        logger.warning(f"Firestore role check notice: {e}")
 
     raise HTTPException(status_code=401, detail="Invalid government email or password credentials.")
 
